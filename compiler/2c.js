@@ -277,11 +277,14 @@ export default ({ funcs, globals, data, pages }) => {
 
   const mem = gsym('_memory');
   const memPages = gsym('_memoryPages');
+  const initSym = () => gsym('__porf_init');
   const isExported = f => f.export || f.name === '#main';
   const memSub = str => str.replaceAll('_memoryPages', memPages).replaceAll('_memory', mem);
+  const exportedUserFuncs = () => funcs.filter(f => f.export && f.name !== '#main');
+  const useSharedInit = () => !!c2Prefix || exportedUserFuncs().length > 0 || Prefs['2cSharedInit'];
 
   for (const x in invGlobals) {
-    invGlobals[x] = sanitize(invGlobals[x]);
+    invGlobals[x] = gsym(invGlobals[x]);
   }
 
   const includes = new Map(), unixIncludes = new Map(), winIncludes = new Map();
@@ -450,8 +453,13 @@ export default ({ funcs, globals, data, pages }) => {
     }
 
     if (f.name === '#main') {
-      out += '  ' + [...prependMain.values()].join('\n  ');
-      if (prependMain.size > 0) out += '\n\n';
+      if (useSharedInit()) {
+        out += `  ${initSym()}();\n`;
+        if (prependMain.size > 0) out += '\n';
+      } else {
+        out += '  ' + [...prependMain.values()].join('\n  ');
+        if (prependMain.size > 0) out += '\n\n';
+      }
     }
 
     const localKeys = Object.keys(f.locals).sort((a, b) => f.locals[a].idx - f.locals[b].idx).slice(f.params.length).sort((a, b) => f.locals[a].idx - f.locals[b].idx);
@@ -1056,6 +1064,31 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
 
   for (const x of funcs) {
     if (x.export || x.name === '#main') out += cify(x);
+  }
+
+  if (useSharedInit() && prependMain.size > 0) {
+    prepend.set('porf init', `void ${initSym()}(void) {\n  if (${mem}) return;\n  ${[...prependMain.values()].join('\n  ')}\n}\n`);
+  }
+
+  if (useSharedInit()) {
+    for (const f of exportedUserFuncs()) {
+      const exportBase = sanitize(String(f.name).replace(/^#/, ''));
+      const fnSym = gsym(f.name);
+      const shimBase = gsym('export_' + exportBase);
+      const userPairs = Math.max(0, (f.params.length - 4) / 2);
+      if (userPairs === 0) {
+        out += `int ${shimBase}(void) {\n  ${initSym()}();\n  (void)${fnSym}(0, 0, 0, 0);\n  return 0;\n}\n\n`;
+      } else {
+        const cParams = [];
+        const cArgs = ['0', '0', '0', '0'];
+        for (let i = 0; i < userPairs; i++) {
+          cParams.push(`f64 p${i}`);
+          cArgs.push(`p${i}`, '1');
+        }
+        const shimName = userPairs === 1 ? shimBase : `${shimBase}_p${userPairs}`;
+        out += `int ${shimName}(${cParams.join(', ')}) {\n  ${initSym()}();\n  (void)${fnSym}(${cArgs.join(', ')});\n  return 0;\n}\n\n`;
+      }
+    }
   }
 
   const rawParams = f => {
