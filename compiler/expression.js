@@ -1,13 +1,48 @@
 import { Opcodes, Valtype } from './wasmSpec.js';
 import { TYPES } from './types.js';
 
-const f64ifyBitwise = op => (_1, _2, { left, right }) => [
-  ...left,
-  Opcodes.i32_trunc_sat_f64_s,
-  ...right,
-  Opcodes.i32_trunc_sat_f64_s,
+// ECMA-262 ToInt32: coerce an f64 operand to a wrapped (mod 2^32) i32.
+// Non-finite values (NaN, ±Infinity) become +0; finite values truncate towards
+// zero and take the result modulo 2^32. Truncating to i64 first then wrapping to
+// i32 gives the modulo wrapping for any finite value representable as an integer
+// (up to 2^53). `value - value` is 0 only for finite values (it is NaN for
+// ±Infinity and NaN), guarding the non-finite case which would otherwise
+// saturate to i64 min/max. Needs a scratch f64 local (`loc`) since the value is
+// used both for the finiteness guard and the truncation.
+const toInt32 = (value, loc, name) => {
+  const local = loc(name, Valtype.f64);
+
+  return [
+  ...value,
+  [ Opcodes.local_tee, local ],
+  [ Opcodes.local_get, local ],
+  [ Opcodes.f64_sub ],
+  [ Opcodes.f64_const, 0 ],
+  [ Opcodes.f64_eq ],
+  [ Opcodes.if, Valtype.i32 ],
+  [ Opcodes.local_get, local ],
+  Opcodes.i64_trunc_sat_f64_s,
+  [ Opcodes.i32_wrap_i64 ],
+  [ Opcodes.else ],
+  [ Opcodes.i32_const, 0 ],
+  [ Opcodes.end ]
+  ];
+};
+
+const f64ifyBitwise = op => (_1, { loc }, { left, right }) => [
+  ...toInt32(left, loc, '#bitwise_left'),
+  ...toInt32(right, loc, '#bitwise_right'),
   [ op ],
   [ Opcodes.f64_convert_i32_s ]
+];
+
+// >>> returns a Uint32 (ECMA-262 unsigned right shift operator), so the i32
+// result must be reinterpreted as unsigned when converting back to f64.
+const f64ifyUSHR = (_1, { loc }, { left, right }) => [
+  ...toInt32(left, loc, '#ushr_left'),
+  ...toInt32(right, loc, '#ushr_right'),
+  [ Opcodes.i32_shr_u ],
+  [ Opcodes.f64_convert_i32_u ]
 ];
 
 export const operatorOpcode = {
@@ -92,6 +127,6 @@ export const operatorOpcode = {
     '^': f64ifyBitwise(Opcodes.i32_xor),
     '<<': f64ifyBitwise(Opcodes.i32_shl),
     '>>': f64ifyBitwise(Opcodes.i32_shr_s),
-    '>>>': f64ifyBitwise(Opcodes.i32_shr_u)
+    '>>>': f64ifyUSHR
   }
 };
