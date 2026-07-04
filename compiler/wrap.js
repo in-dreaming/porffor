@@ -499,7 +499,37 @@ export { createImport };
  * @param {(str: string) => void} print - Function to use for printing (used by console.log etc)
  */
 export default (source, module = undefined, print = str => process.stdout.write(str)) => {
-  createImport('print', 1, 0, i => print(i.toString()));
+  const host = { memory: null };
+
+  const readPorfforString = ptr => {
+    ptr = ptr >>> 0;
+    const mem = host.memory;
+    if (!mem || ptr < 16 || ptr + 4 > mem.byteLength) return null;
+
+    const dv = new DataView(mem.buffer, mem.byteOffset, mem.byteLength);
+    const len = dv.getUint32(ptr, true);
+    if (!len || len > 0x100000) return null;
+
+    if (ptr + 4 + len <= mem.byteLength) {
+      let out = '';
+      for (let i = 0; i < len; i++) out += String.fromCharCode(dv.getUint8(ptr + 4 + i));
+      return out;
+    }
+
+    if (ptr + 4 + len * 2 <= mem.byteLength) {
+      let out = '';
+      for (let i = 0; i < len; i++) out += String.fromCharCode(dv.getUint16(ptr + 4 + i * 2, true));
+      return out;
+    }
+
+    return null;
+  };
+
+  createImport('print', 1, 0, i => {
+    const asStr = readPorfforString(i);
+    if (asStr != null) print(asStr);
+      else print(i.toString());
+  });
   createImport('printChar', 1, 0, i => print(String.fromCharCode(i)));
   createImport('time', 0, 1, () => performance.now());
   createImport('timeOrigin', 0, 1, () => performance.timeOrigin);
@@ -567,6 +597,7 @@ export default (source, module = undefined, print = str => process.stdout.write(
         return acc;
       }, {})
     });
+    host.memory = instance.exports['$'];
   } catch (e) {
     if (!Prefs.d) throw e;
     if (!(e instanceof WebAssembly.CompileError)) throw e;

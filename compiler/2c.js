@@ -765,10 +765,20 @@ extern ${importFunc.returns.length > 0 ? CValtype[importFunc.returns[0]] : 'void
                 line(`printf("${valtype === 'f64' ? '%.15g' : '%i'}", ${vals.pop()})`);
                 includes.set('stdio.h', true);
                 break;
-              case 'printChar':
-                line(`putchar((int)(${vals.pop()}))`);
+              case 'printChar': {
+                if (!prepend.has('__porf_printCharUtf8')) {
+                  prepend.set('__porf_printCharUtf8', `static void __porf_printCharUtf8(f64 x) {
+  unsigned int cp = (unsigned int)(int)x;
+  if (cp <= 0x7F) putchar((int)cp);
+  else if (cp <= 0x7FF) { putchar(0xC0 | (cp >> 6)); putchar(0x80 | (cp & 0x3F)); }
+  else { putchar(0xE0 | (cp >> 12)); putchar(0x80 | ((cp >> 6) & 0x3F)); putchar(0x80 | (cp & 0x3F)); }
+}
+`);
+                }
+                line(`__porf_printCharUtf8(${vals.pop()})`);
                 includes.set('stdio.h', true);
                 break;
+              }
 
               case 'time': {
                 const id = tmpId++;

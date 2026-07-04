@@ -951,7 +951,7 @@ export const BuiltinFuncs = () => {
     returns: [ valtypeBinary ],
     returnType: TYPES.number,
     wasm: () => [
-      // (x − inLow) * (outHigh − outLow) / (inHigh - inLow) + outLow
+      // (x 鈭?inLow) * (outHigh 鈭?outLow) / (inHigh - inLow) + outLow
       [ Opcodes.local_get, 0 ],
       [ Opcodes.local_get, 1 ],
       [ Opcodes.f64_sub ],
@@ -1520,6 +1520,51 @@ export const BuiltinFuncs = () => {
     _new: decl.arguments[3].value !== null,
     _forceCreateThis: true
   }));
+
+  comptime('print', TYPES.undefined, (scope, decl, { generate, getNodeType, knownTypeWithGuess, printStaticStr }) => {
+    if (decl.arguments.length !== 1) {
+      return generate(scope, {
+        type: 'CallExpression',
+        callee: {
+          type: 'MemberExpression',
+          object: { type: 'Identifier', name: 'console' },
+          property: { type: 'Identifier', name: 'log' }
+        },
+        arguments: decl.arguments,
+        optional: decl.optional
+      });
+    }
+
+    generate(scope, decl.arguments[0]);
+    const type = knownTypeWithGuess(scope, getNodeType(scope, decl.arguments[0]));
+
+    if (type === TYPES.number) {
+      return [
+        ...generate(scope, {
+          type: 'CallExpression',
+          callee: { type: 'Identifier', name: 'print' },
+          arguments: decl.arguments,
+          optional: decl.optional,
+          _noComptime: true
+        }),
+        ...printStaticStr(scope, '\n')
+      ];
+    }
+
+    const callee = (type === TYPES.string || type === TYPES.bytestring) ?
+      { type: 'Identifier', name: '__Porffor_printString' } :
+      { type: 'Identifier', name: '__Porffor_consolePrint' };
+
+    return [
+      ...generate(scope, {
+        type: 'CallExpression',
+        callee,
+        arguments: decl.arguments,
+        optional: decl.optional
+      }),
+      ...printStaticStr(scope, '\n')
+    ];
+  });
 
   // compile-time aware console.log to optimize fast paths
   // todo: this breaks console.group, etc - disable this if those are used but edge case for now

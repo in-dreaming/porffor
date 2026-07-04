@@ -2472,6 +2472,8 @@ const generateCall = (scope, decl, _global, _name, unusedValue = false) => {
   } else if (scope.name === name) {
     // fallback for own func but with a different var/id name
     idx = scope.index;
+  } else if (name === 'print' && name in builtinFuncs && builtinFuncs[name].comptime && !decl._noComptime) {
+    return builtinFuncs[name].comptime(scope, decl, { generate, getNodeType, knownType, knownTypeWithGuess, makeString, printStaticStr });
   } else if (name in importedFuncs) {
     idx = importedFuncs[name];
     scope.usesImports = true;
