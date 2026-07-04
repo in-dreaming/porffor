@@ -693,7 +693,9 @@ __attribute__((import_module(""), import_name("${importFunc.import}")))
 extern ${importFunc.returns.length > 0 ? CValtype[importFunc.returns[0]] : 'void'} ${name}(${importFunc.params.map(x => CValtype[x]).join(', ')});`);
               }
 
-              const call = `${name}(${importFunc.params.length > 0 ? vals.pop() : ''})`;
+              let args = [];
+              for (let j = 0; j < importFunc.params.length; j++) args.unshift(removeBrackets(vals.pop()));
+              const call = `${name}(${args.join(', ')})`;
               if (importFunc.returns.length > 0) vals.push(call);
                 else line(call);
 
