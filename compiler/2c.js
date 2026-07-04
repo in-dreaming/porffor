@@ -751,17 +751,34 @@ export default ({ funcs, globals, data, pages }) => {
           let func = funcs.find(x => x.index === i[1]);
           if (!func) {
             const importFunc = importFuncs[i[1]];
-            if (Prefs['2cWasmImports']) {
-              const name = '__porf_import_' + importFunc.name;
-              if (!prepend.has(name)) {
-                prepend.set(name, `
-__attribute__((import_module(""), import_name("${importFunc.import}")))
-extern ${importFunc.returns.length > 0 ? CValtype[importFunc.returns[0]] : 'void'} ${name}(${importFunc.params.map(x => CValtype[x]).join(', ')});`);
+            const importName = '__porf_import_' + importFunc.name;
+
+            let args = [];
+            for (let j = 0; j < importFunc.params.length; j++) args.unshift(removeBrackets(vals.pop()));
+
+            if (importFunc.c) {
+              if (!prepend.has(importName)) {
+                const retType = importFunc.returns.length > 0 ? CValtype[importFunc.returns[0]] : 'void';
+                const params = importFunc.params.map((t, i) => `${CValtype[t]} p${i}`).join(', ');
+                const body = importFunc.c.trim().replaceAll('\n', '\n  ');
+                prepend.set(importName, `static ${retType} ${importName}(${params}) {\n  ${body}\n}\n`);
               }
 
-              let args = [];
-              for (let j = 0; j < importFunc.params.length; j++) args.unshift(removeBrackets(vals.pop()));
-              const call = `${name}(${args.join(', ')})`;
+              const call = `${importName}(${args.join(', ')})`;
+              if (importFunc.returns.length > 0) vals.push(call);
+                else line(call);
+
+              break;
+            }
+
+            if (Prefs['2cWasmImports']) {
+              if (!prepend.has(importName)) {
+                prepend.set(importName, `
+__attribute__((import_module(""), import_name("${importFunc.import}")))
+extern ${importFunc.returns.length > 0 ? CValtype[importFunc.returns[0]] : 'void'} ${importName}(${importFunc.params.map(x => CValtype[x]).join(', ')});`);
+              }
+
+              const call = `${importName}(${args.join(', ')})`;
               if (importFunc.returns.length > 0) vals.push(call);
                 else line(call);
 
@@ -809,6 +826,7 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
               }
 
               default:
+                if (Prefs['2cStrictImports']) throw new Error(`2c: unimplemented import: ${importFunc.name}`);
                 log.warning('2c', `unimplemented import: ${importFunc.name}`);
                 break;
             }
