@@ -74,7 +74,7 @@ export default (code, module = Prefs.module) => {
   if (Prefs.native) target = 'native';
 
   let outFile = Prefs.o;
-  const logProgress = Prefs.profileCompiler || (outFile && !Prefs.native);
+  const logProgress = !Prefs.quiet && (Prefs.profileCompiler || (outFile && !Prefs.native));
 
   // use smaller page sizes internally (65536 / 4 = 16384)
   globalThis.pageSize = Prefs.pageSize ?? (PageSize / 4);

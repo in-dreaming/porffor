@@ -29,13 +29,17 @@ typedef uint64_t u64;
 typedef float f32;
 typedef double f64;
 
-const f64 NaN = 0e+0/0e+0;
-const f64 Infinity = 1e+0/0e+0;
-
 struct ReturnValue {
   f64 value;
   i32 type;
-};\n\n`;
+};
+
+#ifndef __porf_nan
+#define __porf_nan (NAN)
+#endif
+#ifndef __porf_infinity
+#define __porf_infinity (INFINITY)
+#endif\n\n`;
 
 // todo: review whether 2cMemcpy should be default or not
 
@@ -214,6 +218,9 @@ export default ({ funcs, globals, data, pages }) => {
   const zigvm = !!Prefs.zigvm;
   const zigvmAbiVersion = Number(Prefs.zigvmAbiVersion ?? 1);
 
+  const c2Prefix = Prefs['2cPrefix'] ? String(Prefs['2cPrefix']) : '';
+  const entryName = Prefs['2cEntryName'] ?? (Prefs.lambda ? 'user_main' : 'main');
+
   const invOperatorOpcode = Object.values(operatorOpcode).reduce((acc, x) => {
     for (const k in x) {
       acc[x[k]] = k;
@@ -253,6 +260,26 @@ export default ({ funcs, globals, data, pages }) => {
     return type;
   };
 
+  const entrySym = () => c2Prefix ? c2Prefix + entryName : entryName;
+
+  const gsym = raw => {
+    if (typeof raw !== 'string') raw = String(raw);
+    if (raw.startsWith('__porf_import_')) return raw;
+    if (raw === '#main') return entrySym();
+
+    let s = sanitize(raw);
+    if (!c2Prefix) return s;
+    if (s === '_memory') return c2Prefix + 'memory';
+    if (s === '_memoryPages') return c2Prefix + 'memory_pages';
+    if (s.startsWith('_')) return c2Prefix + s.slice(1);
+    return c2Prefix + s;
+  };
+
+  const mem = gsym('_memory');
+  const memPages = gsym('_memoryPages');
+  const isExported = f => f.export || f.name === '#main';
+  const memSub = str => str.replaceAll('_memoryPages', memPages).replaceAll('_memory', mem);
+
   for (const x in invGlobals) {
     invGlobals[x] = sanitize(invGlobals[x]);
   }
@@ -261,19 +288,20 @@ export default ({ funcs, globals, data, pages }) => {
   const prepend = new Map(), prependMain = new Map();
 
   includes.set('stdint.h', true);
+  includes.set('math.h', true);
 
   let out = '';
 
   for (const x in globals) {
     const g = globals[x];
 
-    out += `${CValtype[g.type]} ${sanitize(x)} = ${g.init ?? 0};\n`;
+    out += `static ${CValtype[g.type]} ${gsym(x)} = ${g.init ?? 0};\n`;
   }
 
   if (pages.size > 0) {
     includes.set('stdlib.h', true);
-    prepend.set('_memory', `char* _memory; u32 _memoryPages = ${Math.ceil((pages.size * pageSize) / PageSize)};\n`);
-    prependMain.set('_initMemory', `_memory = calloc(1, _memoryPages * ${PageSize});\n`);
+    prepend.set('_memory', `char* ${mem}; u32 ${memPages} = ${Math.ceil((pages.size * pageSize) / PageSize)};\n`);
+    prependMain.set('_initMemory', `${mem} = calloc(1, ${memPages} * ${PageSize});\n`);
     if (Prefs['2cMemcpy']) includes.set('string.h', true);
   }
 
@@ -281,9 +309,9 @@ export default ({ funcs, globals, data, pages }) => {
   if (activeData.length > 0) {
     const dataOffset = x => pages.allocs.get(x.page) ?? (pages.get(x.page) * pageSize);
     if (Prefs['2cMemcpy']) {
-      prependMain.set('_data', activeData.map(x => `memcpy(_memory + ${dataOffset(x)}, (unsigned char[]){${x.bytes.join(',')}}, ${x.bytes.length});`).join('\n  '));
+      prependMain.set('_data', activeData.map(x => `memcpy(${mem} + ${dataOffset(x)}, (unsigned char[]){${x.bytes.join(',')}}, ${x.bytes.length});`).join('\n  '));
     } else {
-      prependMain.set('_data', activeData.map(x => x.bytes.reduce((acc, y, i) => acc + (y === 0 ? '' : `_memory[${dataOffset(x) + i}]=(u8)${y};`), '')).join('\n  '));
+      prependMain.set('_data', activeData.map(x => x.bytes.reduce((acc, y, i) => acc + (y === 0 ? '' : `${mem}[${dataOffset(x) + i}]=(u8)${y};`), '')).join('\n  '));
     }
   }
 
@@ -405,14 +433,15 @@ export default ({ funcs, globals, data, pages }) => {
     const typedReturns = f.returnType == null;
 
     const shouldInline = false; // f.internal;
+    const exported = isExported(f);
     if (f.name === '#main') {
       if (zigvm) {
         out += `static int zvm_porf_module_init_internal(void) {\n`;
       } else {
-        out += `int ${Prefs.lambda ? 'user_main' : 'main'}(${prependMain.has('argv') ? 'int argc, char* argv[]' : ''}) {\n`;
+        out += `int ${entrySym()}(${prependMain.has('argv') ? 'int argc, char* argv[]' : ''}) {\n`;
       }
     } else {
-      out += `${!typedReturns ? (returns ? CValtype[f.returns[0]] : 'void') : 'struct ReturnValue'} ${shouldInline ? 'inline ' : ''}${cName(f)}(${f.params.map((x, i) => `${CValtype[x]} ${invLocals[i]}`).join(', ')}) {\n`;
+      out += `${exported ? '' : 'static '}${!typedReturns ? (returns ? CValtype[f.returns[0]] : 'void') : 'struct ReturnValue'} ${shouldInline ? 'inline ' : ''}${zigvm ? cName(f) : gsym(f.name)}(${f.params.map((x, i) => `${CValtype[x]} ${invLocals[i]}`).join(', ')}) {\n`;
     }
 
     if (f.name === '__Porffor_promise_runJobs') {
@@ -465,7 +494,8 @@ export default ({ funcs, globals, data, pages }) => {
         // inline c
         let c = i[2];
         c = c.replace(/^\s*(?:(?:inline|static)\s+)?\w+\s+\*?\s*\w+\s*\(.*?\)\s* {([\w\W]*?)\n}/gm, _ => {
-          prepend.set(_, _);
+          if (!/^\s*static\s/.test(_)) _ = _.replace(/^(\s*)/, '$1static ');
+          prepend.set(_, memSub(_));
           return '';
         });
         line(c);
@@ -538,7 +568,7 @@ export default ({ funcs, globals, data, pages }) => {
             const size = vals.pop();
             const src = vals.pop();
             const dst = vals.pop();
-            line(`memcpy(_memory + ${dst}, _memory + ${src}, ${size})`);
+            line(`memcpy(${mem} + ${dst}, ${mem} + ${src}, ${size})`);
             includes.set('string.h', true);
             break;
           }
@@ -556,7 +586,10 @@ export default ({ funcs, globals, data, pages }) => {
 
         case Opcodes.f64_const: {
           const val = i[1];
-          vals.push(val.toString());
+          if (Number.isNaN(val)) vals.push('__porf_nan');
+          else if (val === Infinity) vals.push('__porf_infinity');
+          else if (val === -Infinity) vals.push('-__porf_infinity');
+          else vals.push(val.toString());
           break;
         }
 
@@ -747,7 +780,7 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
           let args = [];
           for (let j = 0; j < func.params.length; j++) args.unshift(removeBrackets(vals.pop()));
 
-          let name = cName(func);
+          let name = zigvm ? cName(func) : gsym(func.name);
           if (ffiFuncs[func.name] && zigvmHostFuncs.has(func.name)) {
             const { parameters } = ffiFuncs[func.name];
             for (let j = 0; j < parameters.length; j++) {
@@ -776,7 +809,7 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
               if (parameters[j] === 'buffer') {
                 let x = args[j];
                 if (x.startsWith('(i32)')) x = x.slice(5);
-                args[j] = `(void*)((u64)_memory + (u64)(${x}) + 4)`;
+                args[j] = `(void*)((u64)${mem} + (u64)(${x}) + 4)`;
               }
 
               if (parameters[j] === 'pointer') {
@@ -938,10 +971,10 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
 
         case Opcodes.memory_grow: {
           const id = localTmpId++;
-          line(`const u32 _oldPages${id} = _memoryPages`);
-          line(`_memoryPages += ${vals.pop()}`);
-          line(`_memory = realloc(_memory, _memoryPages * ${PageSize})`);
-          line(`memset(_memory + _oldPages${id} * ${PageSize}, 0, (_memoryPages - _oldPages${id}) * ${PageSize})`);
+          line(`const u32 _oldPages${id} = ${memPages}`);
+          line(`${memPages} += ${vals.pop()}`);
+          line(`${mem} = realloc(${mem}, ${memPages} * ${PageSize})`);
+          line(`memset(${mem} + _oldPages${id} * ${PageSize}, 0, (${memPages} - _oldPages${id}) * ${PageSize})`);
           vals.push(`_oldPages${id}`);
           break;
         }
@@ -951,7 +984,7 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
             const name = invOpcodes[i[0]];
             const func = CMemFuncs[i[0]];
             if (!prepend.has(name)) {
-              prepend.set(name, `${func.returns || 'void'} ${name}(i32 align, i32 offset, ${func.args.map((x, i) => `${func.argTypes[i]} ${x}`).join(', ')}) {\n  ${func.c.replaceAll('\n', '\n  ')}\n}\n`);
+              prepend.set(name, `static ${func.returns || 'void'} ${name}(i32 align, i32 offset, ${func.args.map((x, i) => `${func.argTypes[i]} ${x}`).join(', ')}) {\n  ${memSub(func.c).replaceAll('\n', '\n  ')}\n}\n`);
             }
 
             const immediates = [ i[1], read_unsignedLEB128(i.slice(2)) ];
@@ -1003,7 +1036,8 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
     }
 
     const shouldInline = false;
-    return `${!typedReturns ? (returns ? CValtype[f.returns[0]] : 'void') : 'struct ReturnValue'} ${shouldInline ? 'inline ' : ''}${ffiFuncs[f.name] ? '(*' : ''}${cName(f)}${ffiFuncs[f.name] ? ')' : ''}(${rawParams(f).map((x, i) => `${CValtype[x]} ${invLocals[i]}`).join(', ')});`;
+    const exported = isExported(f);
+    return `${exported ? '' : 'static '}${!typedReturns ? (returns ? CValtype[f.returns[0]] : 'void') : 'struct ReturnValue'} ${shouldInline ? 'inline ' : ''}${ffiFuncs[f.name] ? '(*' : ''}${zigvm ? cName(f) : gsym(f.name)}${ffiFuncs[f.name] ? ')' : ''}(${rawParams(f).map((x, i) => `${CValtype[x]} ${invLocals[i]}`).join(', ')});`;
   }).join('\n'));
 
   if (zigvm) {
@@ -1103,8 +1137,8 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
     for (const x in globals) {
       const g = globals[x];
 
-      copyGlobals += `${CValtype[g.type]} copy_${sanitize(x)} = ${sanitize(x)};\n`;
-      restoreGlobals += `${sanitize(x)} = copy_${sanitize(x)};\n`;
+      copyGlobals += `${CValtype[g.type]} copy_${gsym(x)} = ${gsym(x)};\n`;
+      restoreGlobals += `${gsym(x)} = copy_${gsym(x)};\n`;
     }
 
     const lambdaWrapper = `
@@ -1168,9 +1202,9 @@ static int send_http(const char* req, size_t req_size, char* resp, size_t resp_s
 int main(void) {
   user_main();
 
-  i32 _memory_pages = _memoryPages;
+  i32 _memory_pages = ${memPages};
   char* _memory_clone = calloc(1, _memory_pages * ${PageSize});
-  memcpy(_memory_clone, _memory, _memory_pages * ${PageSize});
+  memcpy(_memory_clone, ${mem}, _memory_pages * ${PageSize});
 
   ${copyGlobals}
 
@@ -1239,7 +1273,7 @@ int main(void) {
     // memcpy((char*)eventPtr + 4, event, eventLen);
 
     i32 ret = (i32)__Porffor_handler().value;
-    char* ret_str = _memory + ret + 4;
+    char* ret_str = ${mem} + ret + 4;
     i32 ret_str_len = *((i32*)(ret_str - 4));
 
     // 3. POST response
@@ -1253,7 +1287,7 @@ int main(void) {
     send_http(req, (size_t)req_size, NULL, 0);
 
     // reset js state after response
-    memcpy(_memory, _memory_clone, _memory_pages * ${PageSize});
+    memcpy(${mem}, _memory_clone, _memory_pages * ${PageSize});
 
     ${restoreGlobals}
   }

@@ -12,5 +12,11 @@ const areaColors = {
   wrap: [ 250, 100, 20 ]
 };
 
-export const log = (area, ...args) => console.log(`\u001b[90m[\u001b[0m${rgb(...areaColors[area] ?? areaColors.parse, area)}\u001b[90m]\u001b[0m`, ...args);
-log.warning = (area, ...args) => log(area, '\u001b[93m' + args[0], ...args.slice(1), '\u001b[0m');
+export const log = (area, ...args) => {
+  if (globalThis.Prefs?.quiet) return;
+  console.log(`\u001b[90m[\u001b[0m${rgb(...areaColors[area] ?? areaColors.parse, area)}\u001b[90m]\u001b[0m`, ...args);
+};
+log.warning = (area, ...args) => {
+  if (globalThis.Prefs?.quiet) return;
+  log(area, '\u001b[93m' + args[0], ...args.slice(1), '\u001b[0m');
+};
