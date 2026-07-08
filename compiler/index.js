@@ -29,6 +29,46 @@ const logFuncs = (funcs, globals, exceptions) => {
 const fs = (typeof process?.version !== 'undefined' ? (await import('node:fs')) : undefined);
 const execSync = (typeof process?.version !== 'undefined' ? (await import('node:child_process')).execSync : undefined);
 
+const zigvmUnsupportedConstructs = program => {
+  const found = new Map();
+  const add = (kind, detail) => {
+    if (!found.has(kind)) found.set(kind, detail);
+  };
+  const visit = node => {
+    if (!node || typeof node !== 'object') return;
+    switch (node.type) {
+      case 'AwaitExpression': add('async', 'await expression'); break;
+      case 'YieldExpression': add('generator', 'yield expression'); break;
+      case 'TryStatement': add('try/catch/finally', 'try statement'); break;
+      case 'ThrowStatement': add('throw/unwind', 'throw statement'); break;
+      case 'NewExpression':
+      case 'CallExpression': {
+        const callee = node.callee;
+        const name = callee?.name ?? callee?.property?.name;
+        if (name === 'Promise') add('promise', 'Promise constructor/call');
+        break;
+      }
+    }
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') && node.async) {
+      add('async', 'async function');
+    }
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') && node.generator) {
+      add('generator', 'generator function');
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'parent') continue;
+      const value = node[key];
+      if (Array.isArray(value)) {
+        for (const item of value) visit(item);
+      } else if (value && typeof value === 'object' && typeof value.type === 'string') {
+        visit(value);
+      }
+    }
+  };
+  visit(program);
+  return [...found.entries()].map(([kind, detail]) => ({ kind, detail }));
+};
+
 let progressLines = 0, progressInterval;
 let spinner = ['-', '\\', '|', '/'], spin = 0;
 const progressStart = msg => {
@@ -95,6 +135,13 @@ export default (code, module = Prefs.module) => {
   if (logProgress) progressStart('parsing...');
   const t0 = performance.now();
   const program = parse(code);
+  if (Prefs.zigvm) {
+    const unsupported = zigvmUnsupportedConstructs(program);
+    if (unsupported.length > 0) {
+      const details = unsupported.map(x => `${x.kind} (${x.detail})`).join(', ');
+      throw new Error(`unsupported construct in --zigvm v1: ${details}`);
+    }
+  }
   if (logProgress) progressDone('parsed', t0);
 
   if (logProgress) progressStart('generating wasm...');

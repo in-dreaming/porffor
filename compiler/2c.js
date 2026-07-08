@@ -2,6 +2,7 @@ import { read_unsignedLEB128 } from './encoding.js';
 import { Blocktype, Opcodes, Valtype, PageSize } from './wasmSpec.js';
 import { operatorOpcode } from './expression.js';
 import { log } from './log.js';
+import fs from 'node:fs';
 
 const CValtype = {
   i8: 'u8',
@@ -214,10 +215,32 @@ const zigvmValidateAbiType = (type, allowed, label) => {
   if (!allowed.has(type)) throw new Error(`unsupported zigvm ABI type for ${label}: ${type}`);
 };
 
+const ZigvmSafepointFlags = {
+  entry: 0x1,
+  backedge: 0x2,
+  call: 0x4,
+  async: 0x8,
+  unwind: 0x10
+};
+
 export default ({ funcs, globals, data, pages }) => {
   if (Prefs.secure) log.warning('2c', `native/c targets are not sandboxed or proven to be safe (--secure)`);
   const zigvm = !!Prefs.zigvm;
   const zigvmAbiVersion = Number(Prefs.zigvmAbiVersion ?? 1);
+  const zigvmManifestPath = Prefs.zigvmManifest ? String(Prefs.zigvmManifest) : null;
+  const zigvmManifest = {
+    version: 1,
+    module: typeof Prefs.module === 'string' ? Prefs.module : (globalThis.file ?? 'porffor-module'),
+    exports: [],
+    host_imports: [],
+    runtime_api: zigvm ? {
+      name: 'zvm_porf_runtime_api_t',
+      abi_version: zigvmAbiVersion,
+      flags: ZigvmSafepointFlags
+    } : null,
+    safepoints: [],
+    unsupported_constructs: []
+  };
 
   const c2Prefix = Prefs['2cPrefix'] ? String(Prefs['2cPrefix']) : '';
   const entryName = Prefs['2cEntryName'] ?? (Prefs.lambda ? 'user_main' : 'main');
@@ -245,6 +268,15 @@ export default ({ funcs, globals, data, pages }) => {
   };
   const zigvmInternalName = name => `zvm_porf_user_${sanitize(name)}`;
   const cName = f => zigvm && f.export && f.name !== '#main' ? zigvmInternalName(f.name) : sanitize(f.name);
+  const zigvmRecordSafepoint = (kind, func, extra = {}) => {
+    if (!zigvm) return;
+    zigvmManifest.safepoints.push({
+      function: func?.name ?? '#unknown',
+      kind,
+      flag: ZigvmSafepointFlags[kind],
+      ...extra
+    });
+  };
   const zigvmExportParams = f => {
     const params = f.zigvmAbiParamTypes ?? [];
     const expected = Math.floor(f.params.length / 2);
@@ -719,7 +751,10 @@ export default ({ funcs, globals, data, pages }) => {
         case Opcodes.loop: {
           line(`// loop ${invValtype[i[1]] ?? ''}`, false);
           blockStart(i, true);
-          if (zigvm) line('zvm_porf_safepoint()');
+          if (zigvm) {
+            zigvmRecordSafepoint('backedge', f, { opcode_index: _ });
+            line('zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_BACKEDGE)');
+          }
           endNeedsCurly.push(false);
           break;
         }
@@ -844,6 +879,7 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
 
           let name = zigvm ? cName(func) : gsym(func.name);
           if (ffiFuncs[func.name] && zigvmHostFuncs.has(func.name)) {
+            if (zigvm) line('zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL)');
             const { parameters } = ffiFuncs[func.name];
             for (let j = 0; j < parameters.length; j++) {
               if (parameters[j] === 'buffer') {
@@ -881,6 +917,11 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
                 args[j] = `(void*)${x}`;
               }
             }
+          }
+
+          if (zigvm && !ffiFuncs[func.name]) {
+            zigvmRecordSafepoint('call', f, { target: func.name, opcode_index: _ });
+            line('zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL)');
           }
 
           if (func.returns.length > 0) {
@@ -1131,6 +1172,14 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
 
   if (zigvm) {
     const hostNames = [...zigvmHostFuncs];
+    zigvmManifest.host_imports = hostNames.map(name => {
+      const spec = ffiFuncs[name];
+      return {
+        name,
+        parameters: spec.parameters ?? [],
+        result: spec.result ?? 'void'
+      };
+    });
     const abi = [];
     abi.push('#if defined(_WIN32)');
     abi.push('#define ZVM_PORF_EXPORT __declspec(dllexport)');
@@ -1139,6 +1188,20 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
     abi.push('#endif');
     abi.push('');
     abi.push(`#define ZVM_PORF_ABI_VERSION ${zigvmAbiVersion}u`);
+    abi.push('');
+    abi.push('#define ZVM_PORF_SAFEPOINT_ENTRY 0x1u');
+    abi.push('#define ZVM_PORF_SAFEPOINT_BACKEDGE 0x2u');
+    abi.push('#define ZVM_PORF_SAFEPOINT_CALL 0x4u');
+    abi.push('#define ZVM_PORF_SAFEPOINT_ASYNC 0x8u');
+    abi.push('#define ZVM_PORF_SAFEPOINT_UNWIND 0x10u');
+    abi.push('');
+    abi.push('typedef struct zvm_porf_runtime_api {');
+    abi.push('  u32 abi_version;');
+    abi.push('  void* ctx;');
+    abi.push('  void (*safepoint)(void* ctx, u32 flags);');
+    abi.push('  u32 (*poll_reload)(void* ctx, u32 flags);');
+    abi.push('  void (*trap)(void* ctx, u32 code);');
+    abi.push('} zvm_porf_runtime_api_t;');
     abi.push('');
     for (const name of hostNames) {
       const spec = ffiFuncs[name];
@@ -1156,28 +1219,48 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
     abi.push('typedef struct zvm_porf_host_api {');
     abi.push('  u32 abi_version;');
     abi.push('  void* ctx;');
-    abi.push('  void (*safepoint)(void* ctx);');
     for (const name of hostNames) {
       abi.push(`  zvm_porf_host_${sanitize(name)}_fn ${sanitize(name)};`);
     }
     abi.push('} zvm_porf_host_api_t;');
     abi.push('');
+    abi.push('static zvm_porf_runtime_api_t zvm_porf_runtime_api_storage;');
+    abi.push('static const zvm_porf_runtime_api_t* zvm_porf_runtime_api = 0;');
     abi.push('static zvm_porf_host_api_t zvm_porf_host_api_storage;');
     abi.push('static const zvm_porf_host_api_t* zvm_porf_host_api = 0;');
-    abi.push('static inline void zvm_porf_safepoint(void) {');
-    abi.push('  zvm_porf_host_api->safepoint(zvm_porf_host_api->ctx);');
+    abi.push('static inline void zvm_porf_safepoint(u32 flags) {');
+    abi.push('  zvm_porf_runtime_api->safepoint(zvm_porf_runtime_api->ctx, flags);');
     abi.push('}');
     prepend.set('zigvm abi', abi.join('\n'));
 
     const exports = funcs.filter(x => x.export && x.name !== '#main');
+    zigvmManifest.exports = exports.map(f => ({
+      name: f.name,
+      symbol: sanitize(f.name),
+      params: zigvmExportParams(f),
+      result: zigvmExportReturn(f)
+    }));
     const wrappers = [];
-    wrappers.push('ZVM_PORF_EXPORT i32 zvm_porf_init(const zvm_porf_host_api_t* api) {');
+    wrappers.push('ZVM_PORF_EXPORT i32 zvm_porf_init(const zvm_porf_runtime_api_t* api) {');
     wrappers.push('  if (api == 0 || api->abi_version != ZVM_PORF_ABI_VERSION) return -1;');
     wrappers.push('  if (api->safepoint == 0) return -1;');
-    for (const name of hostNames) wrappers.push(`  if (api->${sanitize(name)} == 0) return -1;`);
-    wrappers.push('  zvm_porf_host_api_storage = *api;');
-    wrappers.push('  zvm_porf_host_api = &zvm_porf_host_api_storage;');
+    wrappers.push('  if (api->poll_reload == 0) return -1;');
+    wrappers.push('  if (api->trap == 0) return -1;');
+    wrappers.push('  zvm_porf_runtime_api_storage = *api;');
+    wrappers.push('  zvm_porf_runtime_api = &zvm_porf_runtime_api_storage;');
     wrappers.push('  return zvm_porf_module_init_internal();');
+    wrappers.push('}');
+    wrappers.push('');
+    wrappers.push('ZVM_PORF_EXPORT i32 zvm_porf_set_host_api(const zvm_porf_host_api_t* api) {');
+    if (hostNames.length > 0) {
+      wrappers.push('  if (api == 0 || api->abi_version != ZVM_PORF_ABI_VERSION) return -1;');
+      for (const name of hostNames) wrappers.push(`  if (api->${sanitize(name)} == 0) return -1;`);
+      wrappers.push('  zvm_porf_host_api_storage = *api;');
+      wrappers.push('  zvm_porf_host_api = &zvm_porf_host_api_storage;');
+    } else {
+      wrappers.push('  (void)api;');
+    }
+    wrappers.push('  return 0;');
     wrappers.push('}');
     wrappers.push('');
     wrappers.push('ZVM_PORF_EXPORT void zvm_porf_deinit(void) {');
@@ -1194,7 +1277,8 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
       const result = zigvmExportReturn(f);
       const cParams = params.map((x, i) => `${zigvmCType(x)} a${i}`);
       wrappers.push(`ZVM_PORF_EXPORT ${zigvmCType(result)} ${sanitize(f.name)}(${cParams.join(', ')}) {`);
-      wrappers.push('  zvm_porf_safepoint();');
+      zigvmRecordSafepoint('entry', f, { export: sanitize(f.name) });
+      wrappers.push('  zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_ENTRY);');
       const args = [];
       for (let i = 0; i < params.length; i++) {
         args.push(zigvmToPorfforValue(params[i], `a${i}`), zigvmPorfforType(params[i]));
@@ -1394,6 +1478,11 @@ int main(void) {
 
   const makeIncludes = includes => [...includes.keys()].map(x => `#include <${x}>\n`).join('');
   out = platformSpecific(makeIncludes(winIncludes), makeIncludes(unixIncludes), false) + '\n' + makeIncludes(includes) + '\n' + alwaysPreface + [...prepend.values()].join('\n') + '\n\n' + out;
+
+  if (zigvmManifestPath) {
+    if (!zigvm) throw new Error('--zigvm-manifest requires --zigvm');
+    fs.writeFileSync(zigvmManifestPath, JSON.stringify(zigvmManifest, null, 2) + '\n');
+  }
 
   return `// generated by porffor ${globalThis.version ?? ''}\n` + out.trim();
 };
