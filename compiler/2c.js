@@ -178,7 +178,8 @@ const removeBrackets = str => {
   return str.startsWith('(') && str.endsWith(')') && !str.startsWith('(*') ? str.slice(1, -1) : str;
 };
 
-const zigvmAbiTypes = new Set([ 'i32', 'f64', 'void' ]);
+const zigvmAbiParamTypes = new Set([ 'i32', 'f64' ]);
+const zigvmAbiReturnTypes = new Set([ 'i32', 'f64', 'void' ]);
 const zigvmCType = type => ({
   i32: 'i32',
   f64: 'f64',
@@ -209,8 +210,8 @@ const zigvmFromPorfforValue = (type, expr) => {
     default: throw new Error(`unsupported zigvm ABI return type: ${type}`);
   }
 };
-const zigvmValidateAbiType = (type, label) => {
-  if (!zigvmAbiTypes.has(type)) throw new Error(`unsupported zigvm ABI type for ${label}: ${type}`);
+const zigvmValidateAbiType = (type, allowed, label) => {
+  if (!allowed.has(type)) throw new Error(`unsupported zigvm ABI type for ${label}: ${type}`);
 };
 
 export default ({ funcs, globals, data, pages }) => {
@@ -250,13 +251,13 @@ export default ({ funcs, globals, data, pages }) => {
     if (params.length !== expected || params.some(x => !x)) {
       throw new Error(`zigvm export ${f.name} requires TypeScript ABI annotations on all parameters`);
     }
-    for (const [i, type] of params.entries()) zigvmValidateAbiType(type, `${f.name} parameter ${i}`);
+    for (const [i, type] of params.entries()) zigvmValidateAbiType(type, zigvmAbiParamTypes, `${f.name} parameter ${i}`);
     return params;
   };
   const zigvmExportReturn = f => {
     const type = f.zigvmAbiReturnType ?? (f.returns.length === 0 ? 'void' : null);
     if (!type) throw new Error(`zigvm export ${f.name} requires a TypeScript return annotation`);
-    zigvmValidateAbiType(type, `${f.name} return`);
+    zigvmValidateAbiType(type, zigvmAbiReturnTypes, `${f.name} return`);
     return type;
   };
 
@@ -1088,7 +1089,7 @@ f64 _time_out${id} = (f64)_ts${id}.tv_sec * 1000.0 + (f64)_ts${id}.tv_nsec / 1.0
     prepend.set('porf init', `void ${initSym()}(void) {\n  if (${mem}) return;\n  ${[...prependMain.values()].join('\n  ')}\n}\n`);
   }
 
-  if (useSharedInit()) {
+  if (useSharedInit() && !zigvm) {
     for (const f of exportedUserFuncs()) {
       const exportBase = sanitize(String(f.name).replace(/^#/, ''));
       const fnSym = gsym(f.name);
