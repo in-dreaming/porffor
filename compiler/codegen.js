@@ -7133,11 +7133,12 @@ const generateFunc = (scope, decl, forceNoExpr = false) => {
   funcs.push(func);
 
   if (typedInput && decl.returnType) {
-    const { type, types } = extractTypeAnnotation(decl.returnType);
+    const { type, types, typeName } = extractTypeAnnotation(decl.returnType);
 
     if (type != null) {
       typeUsed(func, type);
       func.returnType = type;
+      func.zigvmAbiReturnType = typeName;
       func.returns = func.returnType === TYPES.undefined && !func.async && !func.generator ? [] : [ valtypeBinary ];
     } else if (types != null) {
       func.returnTypes = types;
@@ -7185,8 +7186,11 @@ const generateFunc = (scope, decl, forceNoExpr = false) => {
         break;
     }
 
-    args.push({ name, def, destr, type: typedInput && x.typeAnnotation });
+    const typeInfo = typedInput && x.typeAnnotation ? extractTypeAnnotation(x.typeAnnotation) : null;
+    args.push({ name, def, destr, type: typedInput && x.typeAnnotation, zigvmAbiType: typeInfo?.typeName });
   }
+
+  func.zigvmAbiParamTypes = args.map(x => x.zigvmAbiType);
 
   if (func.usesArguments) {
     if (!func.hasRestArgument) {
