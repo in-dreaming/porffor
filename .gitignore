@@ -1,17 +1,14 @@
-*.wasm
-#*.csv
-*.txt
-*.exe
-
-node_modules
-package-lock.json
-bun.lock
-deno.lock
-pnpm-lock.yaml
-
 .repl_history
 
+# experimental stuff that shouldn't be committed yet
+/exp
+
+# selfhosted artifacts
+selfhosted/bundle.js
+selfhosted/porf*
+selfhosted/*.c
+
 /test262/test262
-/test262/results.json
+# todo: commit some json to git history to help historical/collaborative info
+/test262/*.json
 /test262/.threads
-/envoy
