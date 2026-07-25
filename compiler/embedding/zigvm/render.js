@@ -4,6 +4,7 @@ import { renderRuntime, rewriteGeneratedC, scanGeneratedC } from './abi.js';
 
 export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
   if (!enabled) return null;
+  const memory = 'zvm_porf_memory(exec, provider)';
   return {
     prelude: () => renderRuntime({ staticEnd, globals, hostImports }),
     functionParams: params => `zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status${params ? ', ' + params : ''}`,
@@ -26,6 +27,13 @@ export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
     },
     hostCall: (name, args) => `zvm_porf_host_${name}(exec, provider, status${args ? ', ' + args : ''})`,
     global: name => `zvm_porf_globals(exec, provider)->${name}`,
+    // Array layout is a v2 arena concern. Keep its address arithmetic and
+    // boxed-value packing out of the upstream renderer with the rest of the
+    // explicit-exec memory accessors.
+    arrayGet: (array, index) => `porf_unpack(*(jsbits*)(${memory} + (u32)${array}.val + 8u + ((u32)${index} << 3)))`,
+    arraySet: (array, index, value) => `*(jsbits*)(${memory} + (u32)${array}.val + 8u + ((u32)${index} << 3)) = ${value}`,
+    arrayLength: array => `*(i32*)(${memory} + (u32)${array}.val)`,
+    setArrayLength: (array, length) => `*(i32*)(${memory} + (u32)${array}.val) = ${length}`,
     prepare: defaultValue => `if (!zvm_porf_prepare(exec, provider, status)) return ${defaultValue};`,
     statusGuard: defaultValue => `if (*status != ZVM_STATUS_V2_OK) return ${defaultValue};`,
     trap: (code, defaultValue) => `if (*status == ZVM_STATUS_V2_OK) *status = zvm_porf_raise_trap(exec, provider, ${code}); return ${defaultValue};`,

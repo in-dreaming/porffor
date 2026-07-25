@@ -9,6 +9,7 @@ import codegen from '../../codegen.js';
 import render from '../../render.js';
 import { lowerExplicitExec } from './lowering.js';
 import { renderRuntime } from './abi.js';
+import { createAdapter } from './render.js';
 
 globalThis.Prefs.zigvmEmbeddedV2 = true;
 globalThis.Prefs.gc = false;
@@ -22,6 +23,12 @@ assert.match(c, /zvm_status_v2\* status/);
 assert.doesNotMatch(c, /\bporf_mem\b/);
 assert.doesNotMatch(c, /zvm_porf_runtime_api_storage/);
 assert.doesNotMatch(c, /\bporf_heap_cur\b/);
+
+const adapter = createAdapter({ enabled: true, staticEnd: 0, globals: [], hostImports: [] });
+assert.match(adapter.arrayGet('array', 'index'), /zvm_porf_memory\(exec, provider\).*array\.val.*index/);
+assert.match(adapter.arraySet('array', 'index', 'value'), /zvm_porf_memory\(exec, provider\).*array\.val.*index.*= value/);
+assert.match(adapter.arrayLength('array'), /zvm_porf_memory\(exec, provider\).*array\.val/);
+assert.match(adapter.setArrayLength('array', 'length'), /zvm_porf_memory\(exec, provider\).*array\.val.*= length/);
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), 'porffor-zigvm-v2-'));

@@ -602,7 +602,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
       case K.Alloc: return [embedded ? embedded.alloc(rx(node[N_A], P_COMMA), `${node[N_B]}u`) : `porf_alloc(${rx(node[N_A], P_COMMA)}, ${node[N_B]}u)`, P_POSTFIX];
 
       case K.ArrGet:
-        if (embedded) return [`porf_unpack(*(jsbits*)(${embedded.memory()} + (u32)${rx(node[N_A], P_POSTFIX)}.val + 8u + ((u32)${rx(node[N_B], P_COMMA)} << 3)))`, P_POSTFIX];
+        if (embedded) return [embedded.arrayGet(rx(node[N_A], P_POSTFIX), rx(node[N_B], P_COMMA)), P_POSTFIX];
         return [`porf_arr_get(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)})`, P_POSTFIX];
       case K.LenGet: return [`*(i32*)(${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_A], P_ADD)})`, P_UNARY];
 
@@ -834,12 +834,12 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         return;
 
       case K.ArrSet:
-        if (embedded) emit(`${ind()}*(jsbits*)(${embedded.memory()} + (u32)${rx(node[N_A], P_POSTFIX)}.val + 8u + ((u32)${rx(node[N_B], P_COMMA)} << 3)) = ${packArg(node[N_C])};\n`);
+        if (embedded) emit(`${ind()}${embedded.arraySet(rx(node[N_A], P_POSTFIX), rx(node[N_B], P_COMMA), packArg(node[N_C]))};\n`);
         else emit(`${ind()}porf_arr_set(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)}, ${jsArg(node[N_C])});\n`);
         return;
 
       case K.ArrLenSet:
-        if (embedded) emit(`${ind()}*(i32*)(${embedded.memory()} + (u32)${rx(node[N_A], P_POSTFIX)}.val) = ${rx(node[N_B], P_COMMA)};\n`);
+        if (embedded) emit(`${ind()}${embedded.setArrayLength(rx(node[N_A], P_POSTFIX), rx(node[N_B], P_COMMA))};\n`);
         else emit(`${ind()}porf_arr_set_len(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)});\n`);
         return;
 
