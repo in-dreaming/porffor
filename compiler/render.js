@@ -6,6 +6,7 @@ import {
 } from './ir.js';
 import { TYPES, TYPE_NAMES } from './types.js';
 import { ieee754_binary64 } from './encoding.js';
+import { createAdapter } from './embedding/zigvm/render.js';
 
 // C type per IR value type
 const CT = [];
@@ -251,6 +252,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const funcOf = ref => typeof ref === 'number' ? funcs[ref] : funcByName.get(ref);
   const fnSym = f => `p${f.index}_${sanitize(String(f.name))}`;
   const zigvmEnabled = !!prefs.zigvm;
+  const embeddedV2 = !!prefs.zigvmEmbeddedV2;
   const nativeFetchFuncSym = name => {
     const f = funcByName.get(name);
     if (!f) throw new Error(`missing native fetch function ${name}`);
@@ -317,8 +319,15 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
     }
     dataOffsets.staticEnd = off;
   }
+  const embedded = createAdapter({
+    enabled: embeddedV2,
+    staticEnd: dataOffsets.staticEnd,
+    globals,
+    hostImports: zigvm?.hostImports ?? []
+  });
 
   let depth = 1;
+  let embeddedReturnDefault = '0';
   const ind = () => '  '.repeat(depth);
 
   // break/continue lower to plain C when targeting the innermost breakable, else goto,
@@ -418,8 +427,10 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         return [`${dataOffsets[node[N_A]]}u`, P_PRIM];
 
       case K.Local:
-      case K.Global:
         return [sanitize(node[N_A]), P_PRIM];
+
+      case K.Global:
+        return [embedded ? embedded.global(sanitize(node[N_A])) : sanitize(node[N_A]), P_PRIM];
 
       case K.Bin: {
         const op = node[N_A], t = node[N_B][N_TYPE] === T.none ? node[N_TYPE] : node[N_B][N_TYPE];
@@ -521,7 +532,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
       case K.Load: {
         const ctype = node[N_A];
         const [off, unaligned] = node[N_C];
-        const addr = `MEM + ${rx(node[N_B], P_ADD)}${off ? ` + ${off}u` : ''}`;
+        const addr = `${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_B], P_ADD)}${off ? ` + ${off}u` : ''}`;
         if (unaligned) {
           // signed unaligned: load unsigned width, cast (u8/i8 are always aligned)
           if (ctype === 'i16') return [`(int16_t)porf_load_un_u16(${addr})`, P_CAST];
@@ -556,18 +567,19 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         }
         const name = f ? fnSym(f) : sanitize(String(node[N_A]));
         const args = node[N_B].map(a => rx(a, P_COMMA)).join(', ');
-        const call = `${name}(${args})`;
+        const call = embedded && f ? `${name}(${embedded.functionArgs(args)})` : `${name}(${args})`;
         return [zigvmEnabled ? `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})` : call, P_POSTFIX];
       }
 
       case K.HostCall: {
         const args = node[N_B].map(a => rx(a, P_COMMA)).join(', ');
         const name = sanitize(String(node[N_A]));
-        const call = `zvm_porf_host_api->${name}(zvm_porf_host_api->ctx${args ? ', ' + args : ''})`;
-        return [`(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})`, P_POSTFIX];
+        const call = embedded ? embedded.hostCall(name, args) : `zvm_porf_host_api->${name}(zvm_porf_host_api->ctx${args ? ', ' + args : ''})`;
+        return [embedded ? call : `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})`, P_POSTFIX];
       }
 
       case K.CallDynamic: {
+        if (embedded) throw new Error('embedded v2 does not support dynamic calls');
         const [args, newTarget, spreadArr] = node[N_C];
         const newt = newTarget ? rx(newTarget, P_COMMA) : 'JV_UNDEFINED';
         if (spreadArr) {
@@ -583,10 +595,12 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
       case K.Await: return [`porf_await(${rx(node[N_A], P_COMMA)})`, P_POSTFIX];
       case K.Yield: return [`porf_yield(${rx(node[N_A], P_COMMA)})`, P_POSTFIX];
 
-      case K.Alloc: return [`porf_alloc(${rx(node[N_A], P_COMMA)}, ${node[N_B]}u)`, P_POSTFIX];
+      case K.Alloc: return [embedded ? embedded.alloc(rx(node[N_A], P_COMMA), `${node[N_B]}u`) : `porf_alloc(${rx(node[N_A], P_COMMA)}, ${node[N_B]}u)`, P_POSTFIX];
 
-      case K.ArrGet: return [`porf_arr_get(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)})`, P_POSTFIX];
-      case K.LenGet: return [`*(i32*)(MEM + ${rx(node[N_A], P_ADD)})`, P_UNARY];
+      case K.ArrGet:
+        if (embedded) return [`porf_unpack(*(jsbits*)(${embedded.memory()} + (u32)${rx(node[N_A], P_POSTFIX)}.val + 8u + ((u32)${rx(node[N_B], P_COMMA)} << 3)))`, P_POSTFIX];
+        return [`porf_arr_get(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)})`, P_POSTFIX];
+      case K.LenGet: return [`*(i32*)(${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_A], P_ADD)})`, P_UNARY];
 
       default:
         throw new Error(`render: cannot render ${KNames[node[N_KIND]]} as expression`);
@@ -617,14 +631,16 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         return;
       }
 
-      case K.Assign:
-        emit(`${ind()}${sanitize(node[N_A][N_A])} = ${rx(node[N_B], P_COMMA)};\n`);
+      case K.Assign: {
+        const target = node[N_A][N_KIND] === K.Global && embedded ? embedded.global(sanitize(node[N_A][N_A])) : sanitize(node[N_A][N_A]);
+        emit(`${ind()}${target} = ${rx(node[N_B], P_COMMA)};\n`);
         return;
+      }
 
       case K.Store: {
         const ctype = node[N_A];
         const [off, unaligned, value] = node[N_C];
-        const addr = `MEM + ${rx(node[N_B], P_ADD)}${off ? ` + ${off}u` : ''}`;
+        const addr = `${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_B], P_ADD)}${off ? ` + ${off}u` : ''}`;
         if (unaligned) {
           const un = { i16: 'u16', i32: 'u32', i64: 'u64', jsval: 'u64' }[ctype] ?? ctype;
           emit(`${ind()}porf_store_un_${un}(${addr}, ${ctype === 'jsval' ? packArg(value) : rx(value, P_COMMA)});\n`);
@@ -635,12 +651,13 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
 
       case K.MemCopy: {
         const [bytes, mayOverlap] = node[N_C];
-        emit(`${ind()}${mayOverlap ? 'memmove' : 'memcpy'}(MEM + ${rx(node[N_A], P_ADD)}, MEM + ${rx(node[N_B], P_ADD)}, ${rx(bytes, P_COMMA)});\n`);
+        const memory = embedded ? embedded.memory() : 'MEM';
+        emit(`${ind()}${mayOverlap ? 'memmove' : 'memcpy'}(${memory} + ${rx(node[N_A], P_ADD)}, ${memory} + ${rx(node[N_B], P_ADD)}, ${rx(bytes, P_COMMA)});\n`);
         return;
       }
 
       case K.MemFill:
-        emit(`${ind()}memset(MEM + ${rx(node[N_A], P_ADD)}, ${rx(node[N_B], P_COMMA)}, ${rx(node[N_C], P_COMMA)});\n`);
+        emit(`${ind()}memset(${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_A], P_ADD)}, ${rx(node[N_B], P_COMMA)}, ${rx(node[N_C], P_COMMA)});\n`);
         return;
 
       case K.If: {
@@ -659,7 +676,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         const [stmts, label] = node[N_C];
         const updateC = update == null ? null
           : update[N_KIND] === K.Assign
-            ? `${sanitize(update[N_A][N_A])} = ${rx(update[N_B], P_COMMA)}`
+            ? `${update[N_A][N_KIND] === K.Global && embedded ? embedded.global(sanitize(update[N_A][N_A])) : sanitize(update[N_A][N_A])} = ${rx(update[N_B], P_COMMA)}`
             : rx(update, P_COMMA);
         if (update) emit(`${ind()}for (; ${cond ? rx(cond, P_COMMA) : ''}; ${updateC}) {\n`);
           else if (cond) emit(`${ind()}while (${rx(cond, P_COMMA)}) {\n`);
@@ -667,7 +684,8 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         loopStack.push(label);
         breakStack.push(label);
         depth++;
-        if (zigvmEnabled) emit(`${ind()}zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_BACKEDGE);\n`);
+        if (embedded) emit(`${ind()}${embedded.poll('ZVM_PORF_SAFEPOINT_BACKEDGE', embeddedReturnDefault)}\n`);
+        else if (zigvmEnabled) emit(`${ind()}zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_BACKEDGE);\n`);
         renderStmts(stmts);
         if (label && usedLabels.has(label + '_c')) emit(`${ind()}${sanitize(label)}_c:;\n`);
         depth--;
@@ -801,19 +819,21 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         return;
 
       case K.GcBarrier:
-        emit(`${ind()}porf_gc_barrier(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)});\n`);
+        if (!embedded) emit(`${ind()}porf_gc_barrier(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)});\n`);
         return;
 
       case K.ArrSet:
-        emit(`${ind()}porf_arr_set(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)}, ${jsArg(node[N_C])});\n`);
+        if (embedded) emit(`${ind()}*(jsbits*)(${embedded.memory()} + (u32)${rx(node[N_A], P_POSTFIX)}.val + 8u + ((u32)${rx(node[N_B], P_COMMA)} << 3)) = ${packArg(node[N_C])};\n`);
+        else emit(`${ind()}porf_arr_set(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)}, ${jsArg(node[N_C])});\n`);
         return;
 
       case K.ArrLenSet:
-        emit(`${ind()}porf_arr_set_len(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)});\n`);
+        if (embedded) emit(`${ind()}*(i32*)(${embedded.memory()} + (u32)${rx(node[N_A], P_POSTFIX)}.val) = ${rx(node[N_B], P_COMMA)};\n`);
+        else emit(`${ind()}porf_arr_set_len(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)});\n`);
         return;
 
       case K.LenSet:
-        emit(`${ind()}*(i32*)(MEM + ${rx(node[N_A], P_ADD)}) = ${rx(node[N_B], P_COMMA)};\n`);
+        emit(`${ind()}*(i32*)(${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_A], P_ADD)}) = ${rx(node[N_B], P_COMMA)};\n`);
         return;
 
       case K.RawC:
@@ -832,11 +852,13 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const renderFunc = f => {
     const ret = CT[f.retType];
     const params = f.params.map(p => `${CT[p.type]} ${sanitize(p.name)}`).join(', ');
-    emit(`${ret} ${fnSym(f)}(${params || 'void'}) {\n`);
+    emit(`${ret} ${fnSym(f)}(${embedded ? embedded.functionParams(params) : (params || 'void')}) {\n`);
+    embeddedReturnDefault = f.retType === T.jsval ? 'JV_UNDEFINED' : f.retType === T.f64 ? '0.0' : '0';
     depth = 1;
     activeTryDepth = 0;
     loopStack.length = 0;
     usedLabels = new Set();
+    if (embedded) emit(`  if (*status != ZVM_STATUS_V2_OK) return ${embeddedReturnDefault};\n`);
     if (needsCoro(f)) emit(`  porf_coro_prologue();\n`);
     // declare every function-scoped local at the top (params come from the signature),
     // f.locals has them all, DeclLocal nodes additionally carry in-place initialisers
@@ -868,7 +890,11 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
 
   const head = [];
   const toStr = funcs.find(x => x && x.name === '__ecma262_ToString' && x.body);
-  head.push(RUNTIME_HEAD(dataOffsets.staticEnd, prefs, usesThreads, usesCoro, toStr ? fnSym(toStr) : null));
+  if (embedded) {
+    if (usesCoro || usesThreads) throw new Error('embedded v2 forbids coroutine and thread helpers');
+    head.push('/* PORF-MOD-003: TASK-005 copies this immutable template per exec. */\n');
+    head.push(embedded.prelude());
+  } else head.push(RUNTIME_HEAD(dataOffsets.staticEnd, prefs, usesThreads, usesCoro, toStr ? fnSym(toStr) : null));
   if (zigvmEnabled) {
     const hostTypedefs = [];
     const hostFields = [];
@@ -962,7 +988,7 @@ static inline void zvm_porf_safepoint(u32 flags) {
     }
 
     let blob = image, blobLen = image.length;
-    let init = `static void porf_data_init(void) {\n  memcpy(MEM + ${imageBase}, porf_data, ${image.length}u);\n}\n\n`;
+    let init = embedded ? '' : `static void porf_data_init(void) {\n  memcpy(MEM + ${imageBase}, porf_data, ${image.length}u);\n}\n\n`;
     if (prefs.compressData && image.length > 0) {
       const compressed = lz4Compress(image);
       if (compressed.len < image.length) {
@@ -994,19 +1020,21 @@ static inline void zvm_porf_safepoint(u32 flags) {
     }
     if (parts.length > 0 || lines.length === 0) lines.push('"' + parts.join('') + '"');
 
-    head.push(`static const u8 porf_data[] =\n${lines.join('\n')};\n${init}`);
+    head.push(`static const u8 ${embedded ? 'zvm_porf_static_image' : 'porf_data'}[] =\n${lines.join('\n')};\n${init}`);
   } else {
-    head.push('static void porf_data_init(void) {}\n\n');
+    if (!embedded) head.push('static void porf_data_init(void) {}\n\n');
   }
 
   // forward decls, tree-shaken (null) funcs get a trap wrapper instead
   for (const f of funcs) {
     if (!f) continue;
     const params = f.params.map(p => CT[p.type]).join(', ');
-    head.push(`${CT[f.retType]} ${fnSym(f)}(${params || 'void'});\n`);
+    head.push(`${CT[f.retType]} ${fnSym(f)}(${embedded ? embedded.functionParams(params) : (params || 'void')});\n`);
   }
-  head.push(`${st}jsval porf_call_dynamic(jsval fn, jsval thisv, jsval newtv, i32 argc, jsbits* argv);\n`);
-  head.push(`${st}jsval porf_call_dynamic_arr(jsval fn, jsval thisv, jsval newtv, jsval arr);\n`);
+  if (!embedded) {
+    head.push(`${st}jsval porf_call_dynamic(jsval fn, jsval thisv, jsval newtv, i32 argc, jsbits* argv);\n`);
+    head.push(`${st}jsval porf_call_dynamic_arr(jsval fn, jsval thisv, jsval newtv, jsval arr);\n`);
+  }
   if (usesSyncAsync) {
     head.push(`${st}jsval porf_async_call_sync(u32 idx, jsval callee, u32 env, jsval thisv, jsval newtv, i32 argc, jsbits* argv);\n`);
   }
@@ -1018,7 +1046,7 @@ static inline void zvm_porf_safepoint(u32 flags) {
   }
 
   // module globals (top-level JS bindings)
-  for (const g of globals) head.push(`${st}${CT[g.type]} ${sanitize(g.name)}${g.type === T.jsval ? ` = {0.0, ${TYPES.undefined}}` : ''};\n`);
+  if (!embedded) for (const g of globals) head.push(`${st}${CT[g.type]} ${sanitize(g.name)}${g.type === T.jsval ? ` = {0.0, ${TYPES.undefined}}` : ''};\n`);
   head.push('\n');
   if (gcEnabled) {
     const markGlobalRootLines = [];
@@ -1056,10 +1084,12 @@ static inline void zvm_porf_safepoint(u32 flags) {
   // per-function metadata tables, emitted before bodies so __Porffor_funcLut_* can read them.
   // porf_fnflags: bits 0-2 coroutine dispatch (masked off in porf_call_dynamic), bit 3 callable,
   // bit 4 constructor, funcLut.flags recovers legacy callable|constr<<1 via (flags >> 3) & 3
-  head.push(`${st}const u8 porf_fnflags[] = { ${Array.from(funcs, fnFlags).join(', ') || '0'} };\n`);
-  if (usesSyncAsync) head.push(`${st}const u8 porf_fnneeds_coro[] = { ${Array.from(funcs, f => needsCoro(f) ? 1 : 0).join(', ') || '0'} };\n`);
-  head.push(`${st}const u16 porf_fnlen[] = { ${Array.from(funcs, f => f?.jsLength ?? 0).join(', ') || '0'} };\n`);
-  head.push(`${st}const u32 porf_fnname[] = { ${fnNameOff.join(', ') || '0'} };\n`);
+  if (!embedded) {
+    head.push(`${st}const u8 porf_fnflags[] = { ${Array.from(funcs, fnFlags).join(', ') || '0'} };\n`);
+    if (usesSyncAsync) head.push(`${st}const u8 porf_fnneeds_coro[] = { ${Array.from(funcs, f => needsCoro(f) ? 1 : 0).join(', ') || '0'} };\n`);
+    head.push(`${st}const u16 porf_fnlen[] = { ${Array.from(funcs, f => f?.jsLength ?? 0).join(', ') || '0'} };\n`);
+    head.push(`${st}const u32 porf_fnname[] = { ${fnNameOff.join(', ') || '0'} };\n`);
+  }
   head.push('\n');
 
   if (prefs.rawHead) head.push(prefs.rawHead + '\n');
@@ -1080,6 +1110,8 @@ static inline void zvm_porf_safepoint(u32 flags) {
   }
 
   for (const f of funcs) if (f) renderFunc(f);
+
+  if (embedded) return embedded.finish(head.join('') + out.join(''));
 
   // dynamic call: one switch dispatcher, no per-function wrappers. fn values are records
   // [fnIdx u32][env u32] (payload = offset, nonzero = truthy), each case adapts the
@@ -1736,7 +1768,7 @@ int porf_native_fetch_read_value(jsval value, const char** out_buf, size_t* out_
   }
 
   if (usesMath) head.splice(1, 0, '#include <math.h>\n');
-  const c = head.join('') + out.join('');
+  const c = embedded ? embedded.finish(head.join('') + out.join('')) : head.join('') + out.join('');
   if (zigvmEnabled) {
     return {
       c,

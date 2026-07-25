@@ -2,6 +2,8 @@ import { underline, bold } from './log.js';
 import parse from './parse.js';
 import codegen from './codegen.js';
 import render from './render.js';
+import { isEmbeddedV2, validateProfile } from './embedding/zigvm/abi.js';
+import { lowerExplicitExec } from './embedding/zigvm/lowering.js';
 import './prefs.js';
 
 const logFuncs = (funcs, globals) => {
@@ -97,6 +99,9 @@ const progressClear = () => {
 };
 export default (code, module = Prefs.module, run = false) => {
   Prefs.module = module;
+  const embeddedV2 = isEmbeddedV2(Prefs);
+  validateProfile(Prefs);
+  if (embeddedV2) Prefs.gc = false;
 
   const optPref = process.argv.find(x => x.startsWith('-O'))?.[2];
 
@@ -111,11 +116,11 @@ export default (code, module = Prefs.module, run = false) => {
   if (logProgress) progressStart('parsing...');
   const t0 = performance.now();
   const program = parse(code);
-  if (Prefs.zigvm) {
+  if (Prefs.zigvm || embeddedV2) {
     const unsupported = zigvmUnsupportedConstructs(program);
     if (unsupported.length > 0) {
       const details = unsupported.map(x => `${x.kind} (${x.detail})`).join(', ');
-      throw new Error(`unsupported construct in --zigvm v1: ${details}`);
+      throw new Error(`unsupported construct in ${embeddedV2 ? '--zigvm-embedded-v2' : '--zigvm v1'}: ${details}`);
     }
   }
   if (logProgress) progressDone('parsed', t0);
@@ -126,6 +131,7 @@ export default (code, module = Prefs.module, run = false) => {
   if (logProgress) progressStart('generating IR...');
   const t1 = performance.now();
   const cg = codegen(program);
+  if (embeddedV2) lowerExplicitExec(cg);
   if (globalThis.compileCallback) globalThis.compileCallback(cg);
   cg.times = [ t0, t1, performance.now() ];
 
