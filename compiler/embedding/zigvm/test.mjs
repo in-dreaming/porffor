@@ -38,6 +38,8 @@ const compile = (args, output) => {
 };
 const includeDir = resolve(root, '../../include');
 const compileC = source => execFileSync('zig', [ 'cc', `-I${includeDir}`, '-c', source, '-o', `${source}.o` ], { cwd: root, stdio: 'pipe' });
+const executablePath = name => join(temp, process.platform === 'win32' ? `${name}.exe` : name);
+const runCompiled = name => execFileSync(executablePath(name), [], { cwd: root, stdio: 'pipe' });
 const embeddedSymbol = (source, name) => {
   const match = source.match(new RegExp(`jsval (p\\d+_${name})\\(zvm_porf_exec_ctx_v2\\* exec`));
   assert.ok(match, `missing embedded export ${name}`);
@@ -51,25 +53,29 @@ try {
   const trapped = join(temp, 'trapped.c');
   const nested = join(temp, 'nested.c');
   const hosted = join(temp, 'hosted.c');
+  const statusCommit = join(temp, 'status-commit.c');
   compile([ '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/modes_fixture.ts' ], ordinary);
   compile([ '--zigvm', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/modes_fixture.ts' ], legacy);
   const embeddedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/stateful_fixture.ts' ], embedded);
   const trappedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/trap_fixture.ts' ], trapped);
   const nestedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/nested_status_fixture.ts' ], nested);
   const hostedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/host_status_fixture.ts' ], hosted);
+  const statusCommitC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/status_commit_fixture.ts' ], statusCommit);
   compileC(ordinary);
   compileC(legacy);
   compileC(embedded);
   compileC(trapped);
   compileC(nested);
   compileC(hosted);
+  compileC(statusCommit);
 
   assert.match(embeddedC, /zvm_porf_alloc\(exec, provider/);
   assert.match(embeddedC, /zvm_porf_poll\(exec, provider/);
   assert.doesNotMatch(embeddedC, /\b(?:MEM|porf_mem|porf_heap_cur|zvm_porf_initialized)\b/);
   assert.match(trappedC, /zvm_porf_raise_trap\(exec, provider, ZVM_STATUS_V2_TRAP\)/);
-  assert.match(nestedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\).*p\d+_inner\(exec, provider, status\)/);
-  assert.match(hostedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\).*zvm_porf_host_fail\(exec, provider, status\)/);
+  assert.match(nestedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?p\d+_inner\(exec, provider, status,/);
+  assert.match(hostedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?zvm_porf_host_fail\(exec, provider, status\)/);
+  assert.match(statusCommitC, /_zvm_status_value_0 = .*zvm_porf_host_fail[\s\S]*?if \(\*status != ZVM_STATUS_V2_OK\) return JV_UNDEFINED;[\s\S]*?zvm_porf_globals\(exec, provider\)->shared = _zvm_status_value_0;/);
 
   assert.throws(
     () => compile([ '--zigvm-embedded-v2', '--no-gc', '--module', 'bench/strcat.js' ], join(temp, 'strcat.c')),
@@ -111,8 +117,8 @@ int main(void) {
   return 0;
 }
 `);
-  execFileSync('zig', [ 'cc', `-I${includeDir}`, harness, '-o', join(temp, 'interleave') ], { cwd: root, stdio: 'pipe' });
-  execFileSync(join(temp, process.platform === 'win32' ? 'interleave.exe' : 'interleave'), [], { cwd: root, stdio: 'pipe' });
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, harness, '-o', executablePath('interleave') ], { cwd: root, stdio: 'pipe' });
+  runCompiled('interleave');
 
   const nestedHarness = join(temp, 'nested_status.c');
   const hostHarness = join(temp, 'host_status.c');
@@ -140,8 +146,8 @@ int main(void) {
   return 0;
 }
 `);
-  execFileSync('zig', [ 'cc', `-I${includeDir}`, nestedHarness, '-o', join(temp, 'nested-status') ], { cwd: root, stdio: 'pipe' });
-  execFileSync(join(temp, process.platform === 'win32' ? 'nested-status.exe' : 'nested-status'), [], { cwd: root, stdio: 'pipe' });
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, nestedHarness, '-o', executablePath('nested-status') ], { cwd: root, stdio: 'pipe' });
+  runCompiled('nested-status');
 
   writeFileSync(hostHarness, `#include "hosted.c"
 struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; unsigned polls; unsigned traps; unsigned hosts; zvm_status_v2 poll_status; };
@@ -161,17 +167,38 @@ int main(void) {
   return status == ZVM_STATUS_V2_CANCELLED && exec.polls == 2 && exec.hosts == 1 ? 0 : 2;
 }
 `);
-  execFileSync('zig', [ 'cc', `-I${includeDir}`, hostHarness, '-o', join(temp, 'host-status') ], { cwd: root, stdio: 'pipe' });
-  execFileSync(join(temp, process.platform === 'win32' ? 'host-status.exe' : 'host-status'), [], { cwd: root, stdio: 'pipe' });
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, hostHarness, '-o', executablePath('host-status') ], { cwd: root, stdio: 'pipe' });
+  runCompiled('host-status');
+
+  const statusCommitHarness = join(temp, 'status-commit.c.test.c');
+  const globalSymbol = embeddedSymbol(statusCommitC, 'globalAssignment');
+  writeFileSync(statusCommitHarness, `#include "status-commit.c"
+struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; zvm_status_v2 host_status; };
+static void* base(zvm_porf_exec_ctx_v2* exec) { return exec->memory; }
+static bool reserve(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return bytes <= exec->capacity; }
+static bool commit(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return reserve(exec, bytes); }
+static zvm_status_v2 poll(zvm_porf_exec_ctx_v2* exec, u32 flags) { (void)exec; (void)flags; return ZVM_STATUS_V2_OK; }
+static zvm_status_v2 trap(zvm_porf_exec_ctx_v2* exec, u32 code) { (void)exec; (void)code; return ZVM_STATUS_V2_TRAP; }
+static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id, const zvm_value_v2* args, u32 count, zvm_value_v2* result) { (void)id; (void)args; (void)count; (void)result; return exec->host_status; }
+static int check(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2 failure) {
+  zvm_status_v2 status = ZVM_STATUS_V2_OK;
+  zvm_porf_globals(exec, provider)->shared = porf_box_num(41);
+  exec->host_status = failure;
+  (void)${globalSymbol}(exec, provider, &status, JV_UNDEFINED, JV_UNDEFINED);
+  return status == failure && zvm_porf_globals(exec, provider)->shared.val == 41.0;
+}
+int main(void) {
+  const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
+  zvm_porf_exec_ctx_v2 exec = { .capacity = 256 };
+  return check(&exec, &provider, ZVM_STATUS_V2_TRAP) && check(&exec, &provider, ZVM_STATUS_V2_CANCELLED) && check(&exec, &provider, ZVM_STATUS_V2_BUDGET_EXCEEDED) ? 0 : 1;
+}
+`);
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, statusCommitHarness, '-o', executablePath('status-commit') ], { cwd: root, stdio: 'pipe' });
+  runCompiled('status-commit');
 
   const hostRuntime = renderRuntime({ staticEnd: 0, globals: [], hostImports: [ { id: 1, name: 'host', parameters: [], result: 'i32' } ] });
   assert.match(hostRuntime, /if \(\*status == ZVM_STATUS_V2_OK\) \*status = provider->host_dispatch/);
   assert.match(hostRuntime, /provider->raise_trap/);
-} catch (error) {
-  // The sandbox used for repository inspection disallows child-process
-  // creation from Node. Keep structural assertions above available there;
-  // normal test environments still compile and run the generated harness.
-  if (error?.code !== 'EPERM') throw error;
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }

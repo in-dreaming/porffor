@@ -336,6 +336,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const loopStack = [];
   const breakStack = [];
   let activeTryDepth = 0;
+  let embeddedValueIndex = 0;
   let usedLabels = new Set();
 
   const paren = (s, p, need) => p < need ? `(${s})` : s;
@@ -616,6 +617,22 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
     return paren(code, prec, need);
   };
 
+  // PORF-MOD-004: C evaluates a store's right hand side before the store, but
+  // an embedded call reports failure through `status` rather than an exception.
+  // Materialize each value used to mutate exec state and check that status
+  // before committing the write; a fallback call value must never reach arena
+  // memory, globals, or arrays.
+  const embeddedValue = (node, type = CT[node[N_TYPE]]) => {
+    if (!embedded) return rx(node, P_COMMA);
+    const name = `_zvm_status_value_${embeddedValueIndex++}`;
+    emit(`${ind()}${type} ${name} = ${rx(node, P_COMMA)};\n`);
+    emit(`${ind()}${embedded.statusGuard(embeddedReturnDefault)}\n`);
+    return name;
+  };
+
+  const embeddedPackValue = (value, type) =>
+    type === T.jsval ? `porf_pack(${value})` : `porf_pack(porf_box_num(${value}))`;
+
   const renderStmts = stmts => {
     for (let i = 0; i < stmts.length; i++) {
       const s = stmts[i];
@@ -635,38 +652,55 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
       case K.DeclLocal: {
         // locals hoist to function top, in-place DeclLocal becomes assignment
         const init = node[N_B];
-        if (init) emit(`${ind()}${sanitize(node[N_A])} = ${rx(init, P_COMMA)};\n`);
+        if (init) {
+          const value = embedded ? embeddedValue(init, CT[node[N_C]]) : rx(init, P_COMMA);
+          emit(`${ind()}${sanitize(node[N_A])} = ${value};\n`);
+        }
         return;
       }
 
       case K.Assign: {
         const target = node[N_A][N_KIND] === K.Global && embedded ? embedded.global(sanitize(node[N_A][N_A])) : sanitize(node[N_A][N_A]);
-        emit(`${ind()}${target} = ${rx(node[N_B], P_COMMA)};\n`);
+        const value = embedded ? embeddedValue(node[N_B], CT[node[N_A][N_TYPE]]) : rx(node[N_B], P_COMMA);
+        emit(`${ind()}${target} = ${value};\n`);
         return;
       }
 
       case K.Store: {
         const ctype = node[N_A];
         const [off, unaligned, value] = node[N_C];
-        const addr = `${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_B], P_ADD)}${off ? ` + ${off}u` : ''}`;
+        const pointer = embedded ? embeddedValue(node[N_B], 'u32') : rx(node[N_B], P_ADD);
+        const addr = `${embedded ? embedded.memory() : 'MEM'} + ${pointer}${off ? ` + ${off}u` : ''}`;
+        const renderedValue = embedded ? embeddedValue(value, CT[value[N_TYPE]]) : rx(value, P_COMMA);
+        const storedValue = ctype === 'jsval'
+          ? (embedded ? embeddedPackValue(renderedValue, value[N_TYPE]) : packArg(value))
+          : renderedValue;
         if (unaligned) {
           const un = { i16: 'u16', i32: 'u32', i64: 'u64', jsval: 'u64' }[ctype] ?? ctype;
-          emit(`${ind()}porf_store_un_${un}(${addr}, ${ctype === 'jsval' ? packArg(value) : rx(value, P_COMMA)});\n`);
-        } else if (ctype === 'jsval') emit(`${ind()}*(jsbits*)(${addr}) = ${packArg(value)};\n`);
-          else emit(`${ind()}*(${ctype === 'i8' ? 'int8_t' : ctype === 'i16' ? 'int16_t' : ctype}*)(${addr}) = ${rx(value, P_COMMA)};\n`);
+          emit(`${ind()}porf_store_un_${un}(${addr}, ${storedValue});\n`);
+        } else if (ctype === 'jsval') emit(`${ind()}*(jsbits*)(${addr}) = ${storedValue};\n`);
+          else emit(`${ind()}*(${ctype === 'i8' ? 'int8_t' : ctype === 'i16' ? 'int16_t' : ctype}*)(${addr}) = ${storedValue};\n`);
         return;
       }
 
       case K.MemCopy: {
         const [bytes, mayOverlap] = node[N_C];
         const memory = embedded ? embedded.memory() : 'MEM';
-        emit(`${ind()}${mayOverlap ? 'memmove' : 'memcpy'}(${memory} + ${rx(node[N_A], P_ADD)}, ${memory} + ${rx(node[N_B], P_ADD)}, ${rx(bytes, P_COMMA)});\n`);
+        const dst = embedded ? embeddedValue(node[N_A], 'u32') : rx(node[N_A], P_ADD);
+        const src = embedded ? embeddedValue(node[N_B], 'u32') : rx(node[N_B], P_ADD);
+        const count = embedded ? embeddedValue(bytes, CT[bytes[N_TYPE]]) : rx(bytes, P_COMMA);
+        emit(`${ind()}${mayOverlap ? 'memmove' : 'memcpy'}(${memory} + ${dst}, ${memory} + ${src}, ${count});\n`);
         return;
       }
 
-      case K.MemFill:
-        emit(`${ind()}memset(${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_A], P_ADD)}, ${rx(node[N_B], P_COMMA)}, ${rx(node[N_C], P_COMMA)});\n`);
+      case K.MemFill: {
+        const memory = embedded ? embedded.memory() : 'MEM';
+        const dst = embedded ? embeddedValue(node[N_A], 'u32') : rx(node[N_A], P_ADD);
+        const byte = embedded ? embeddedValue(node[N_B], CT[node[N_B][N_TYPE]]) : rx(node[N_B], P_COMMA);
+        const count = embedded ? embeddedValue(node[N_C], CT[node[N_C][N_TYPE]]) : rx(node[N_C], P_COMMA);
+        emit(`${ind()}memset(${memory} + ${dst}, ${byte}, ${count});\n`);
         return;
+      }
 
       case K.If: {
         emit(`${ind()}if (${rx(node[N_A], P_COMMA)}) {\n`);
@@ -834,18 +868,30 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         return;
 
       case K.ArrSet:
-        if (embedded) emit(`${ind()}${embedded.arraySet(rx(node[N_A], P_POSTFIX), rx(node[N_B], P_COMMA), packArg(node[N_C]))};\n`);
+        if (embedded) {
+          const array = embeddedValue(node[N_A], 'u32');
+          const index = embeddedValue(node[N_B], 'u32');
+          const value = embeddedValue(node[N_C], CT[node[N_C][N_TYPE]]);
+          emit(`${ind()}${embedded.arraySet(array, index, embeddedPackValue(value, node[N_C][N_TYPE]))};\n`);
+        }
         else emit(`${ind()}porf_arr_set(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)}, ${jsArg(node[N_C])});\n`);
         return;
 
       case K.ArrLenSet:
-        if (embedded) emit(`${ind()}${embedded.setArrayLength(rx(node[N_A], P_POSTFIX), rx(node[N_B], P_COMMA))};\n`);
+        if (embedded) {
+          const array = embeddedValue(node[N_A], 'u32');
+          const length = embeddedValue(node[N_B], CT[node[N_B][N_TYPE]]);
+          emit(`${ind()}${embedded.setArrayLength(array, length)};\n`);
+        }
         else emit(`${ind()}porf_arr_set_len(${rx(node[N_A], P_COMMA)}, ${rx(node[N_B], P_COMMA)});\n`);
         return;
 
-      case K.LenSet:
-        emit(`${ind()}*(i32*)(${embedded ? embedded.memory() : 'MEM'} + ${rx(node[N_A], P_ADD)}) = ${rx(node[N_B], P_COMMA)};\n`);
+      case K.LenSet: {
+        const pointer = embedded ? embeddedValue(node[N_A], 'u32') : rx(node[N_A], P_ADD);
+        const value = embedded ? embeddedValue(node[N_B], CT[node[N_B][N_TYPE]]) : rx(node[N_B], P_COMMA);
+        emit(`${ind()}*(i32*)(${embedded ? embedded.memory() : 'MEM'} + ${pointer}) = ${value};\n`);
         return;
+      }
 
       case K.RawC:
         emit(`${ind()}${node[N_A]}${node[N_B] ? ';' : ''}\n`);
@@ -866,6 +912,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
     // PORF-MOD-002: v2 functions always begin with exec/provider/status.
     emit(`${ret} ${fnSym(f)}(${embedded ? embedded.functionParams(params) : (params || 'void')}) {\n`);
     embeddedReturnDefault = f.retType === T.jsval ? 'JV_UNDEFINED' : f.retType === T.f64 ? '0.0' : '0';
+    embeddedValueIndex = 0;
     depth = 1;
     activeTryDepth = 0;
     loopStack.length = 0;
