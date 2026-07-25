@@ -96,18 +96,34 @@ static inline f64 zvm_porf_bits_f64(u64 value) { union { f64 f; u64 u; } bits = 
 static inline u8* zvm_porf_memory(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider) {
   return (u8*)provider->memory_base(exec);
 }
+static inline int zvm_porf_prepare(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status) {
+  if (*status != ZVM_STATUS_V2_OK) return 0;
+  /* Reserve and commit the complete mutable prefix before taking any arena
+   * pointer. This keeps a short arena from becoming an unchecked dereference. */
+  if (!provider->memory_reserve(exec, PORF_CONTEXT_END) || !provider->memory_commit(exec, PORF_CONTEXT_END) || zvm_porf_memory(exec, provider) == NULL) {
+    *status = ZVM_STATUS_V2_INTERNAL;
+    return 0;
+  }
+  return 1;
+}
 static inline zvm_porf_globals_v2* zvm_porf_globals(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider) {
-  const u32 end = PORF_GLOBALS_END;
-  if (!provider->memory_reserve(exec, end) || !provider->memory_commit(exec, end)) return NULL;
   return (zvm_porf_globals_v2*)(zvm_porf_memory(exec, provider) + PORF_STATIC_END);
 }
-static inline u32 zvm_porf_alloc(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, u32 bytes, u32 type_id) {
+static inline u32 zvm_porf_alloc(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 bytes, u32 type_id) {
+  if (!zvm_porf_prepare(exec, provider, status)) return 0u;
+  if (bytes > UINT32_MAX - 7u) {
+    *status = ZVM_STATUS_V2_INTERNAL;
+    return 0u;
+  }
   u8* memory = zvm_porf_memory(exec, provider);
   u32* cursor = (u32*)(memory + PORF_ALLOCATOR_OFFSET);
   const u32 start = (*cursor == 0u ? (PORF_CONTEXT_END + 7u) & ~7u : *cursor);
   const u32 end = start + ((bytes + 7u) & ~7u);
   (void)type_id;
-  if (end < start || !provider->memory_reserve(exec, end) || !provider->memory_commit(exec, end)) return 0u;
+  if (end < start || !provider->memory_reserve(exec, end) || !provider->memory_commit(exec, end)) {
+    *status = ZVM_STATUS_V2_INTERNAL;
+    return 0u;
+  }
   *cursor = end;
   return start;
 }

@@ -29,7 +29,7 @@ const uwebsockets = (typeof process?.version !== 'undefined' ? (await import('./
 const formatTime = ms => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms.toFixed(0)}ms`;
 const formatSize = bytes => bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)}MB` : `${(bytes / 1000).toFixed(1)}KB`;
 
-const zigvmUnsupportedConstructs = (program, { allowExplicitTrap = false } = {}) => {
+const zigvmUnsupportedConstructs = (program, { allowExplicitTrap = false, embeddedV2 = false } = {}) => {
   const found = new Map();
   const add = (kind, detail) => {
     if (!found.has(kind)) found.set(kind, detail);
@@ -47,6 +47,13 @@ const zigvmUnsupportedConstructs = (program, { allowExplicitTrap = false } = {})
         const callee = node.callee;
         const name = callee?.name ?? callee?.property?.name;
         if (name === 'Promise') add('promise', 'Promise constructor/call');
+        // These builtins currently retain ordinary-C runtime helpers. Until a
+        // frozen provider HostCall is assigned, reject them before rendering
+        // rather than emitting an undeclared helper or implicit runtime state.
+        if (embeddedV2 && callee?.object?.name === 'console' && callee?.property?.name === 'log')
+          add('console', 'console.log requires an embedded provider HostCall');
+        if (embeddedV2 && callee?.object?.name === 'performance' && callee?.property?.name === 'now')
+          add('performance', 'performance.now requires an embedded provider HostCall');
         break;
       }
     }
@@ -118,7 +125,7 @@ export default (code, module = Prefs.module, run = false) => {
   const t0 = performance.now();
   const program = parse(code);
   if (Prefs.zigvm || embeddedV2) {
-    const unsupported = zigvmUnsupportedConstructs(program, { allowExplicitTrap: embeddedV2 });
+    const unsupported = zigvmUnsupportedConstructs(program, { allowExplicitTrap: embeddedV2, embeddedV2 });
     if (unsupported.length > 0) {
       const details = unsupported.map(x => `${x.kind} (${x.detail})`).join(', ');
       throw new Error(`unsupported construct in ${embeddedV2 ? '--zigvm-embedded-v2' : '--zigvm v1'}: ${details}`);

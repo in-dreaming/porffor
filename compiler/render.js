@@ -617,6 +617,10 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const renderStmts = stmts => {
     for (let i = 0; i < stmts.length; i++) {
       const s = stmts[i];
+      // PORF-MOD-004: a callee or provider helper may set status while
+      // evaluating the preceding statement. Never begin the next statement
+      // (and therefore no later store or HostCall) in that state.
+      if (embedded) emit(`${ind()}${embedded.statusGuard(embeddedReturnDefault)}\n`);
       renderStmt(s);
       if (s != null && isNode(s) && TERMINATOR_KINDS.has(s[N_KIND]) &&
           !stmts.slice(i + 1).some(hasRawC)) return;
@@ -864,7 +868,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
     activeTryDepth = 0;
     loopStack.length = 0;
     usedLabels = new Set();
-    if (embedded) emit(`  if (*status != ZVM_STATUS_V2_OK) return ${embeddedReturnDefault};\n`);
+    if (embedded) emit(`  ${embedded.prepare(embeddedReturnDefault)}\n`);
     if (needsCoro(f)) emit(`  porf_coro_prologue();\n`);
     // declare every function-scoped local at the top (params come from the signature),
     // f.locals has them all, DeclLocal nodes additionally carry in-place initialisers
@@ -891,6 +895,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
     };
     hoistDecls(f.body);
     renderStmts(f.body);
+    if (embedded) emit(`  ${embedded.statusGuard(embeddedReturnDefault)}\n`);
     emit(`}\n\n`);
   };
 
@@ -1095,6 +1100,10 @@ static inline void zvm_porf_safepoint(u32 flags) {
     if (usesSyncAsync) head.push(`${st}const u8 porf_fnneeds_coro[] = { ${Array.from(funcs, f => needsCoro(f) ? 1 : 0).join(', ') || '0'} };\n`);
     head.push(`${st}const u16 porf_fnlen[] = { ${Array.from(funcs, f => f?.jsLength ?? 0).join(', ') || '0'} };\n`);
     head.push(`${st}const u32 porf_fnname[] = { ${fnNameOff.join(', ') || '0'} };\n`);
+  } else {
+    // Function-name lookup helpers remain valid in the profile; this table is
+    // immutable module metadata, not per-exec runtime state.
+    head.push(`static const u32 porf_fnname[] = { ${fnNameOff.join(', ') || '0'} };\n`);
   }
   head.push('\n');
 
