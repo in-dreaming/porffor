@@ -29,7 +29,8 @@ const compile = (args, output) => {
   execFileSync(process.execPath, [ 'runtime/index.js', 'c', ...args, output ], { cwd: root, stdio: 'pipe' });
   return readFileSync(output, 'utf8');
 };
-const compileC = source => execFileSync('zig', [ 'cc', `-I${resolve(root, '../../include')}`, '-c', source, '-o', `${source}.o` ], { cwd: root, stdio: 'pipe' });
+const includeDir = resolve(root, '../../include');
+const compileC = source => execFileSync('zig', [ 'cc', `-I${includeDir}`, '-c', source, '-o', `${source}.o` ], { cwd: root, stdio: 'pipe' });
 const embeddedSymbol = (source, name) => {
   const match = source.match(new RegExp(`jsval (p\\d+_${name})\\(zvm_porf_exec_ctx_v2\\* exec`));
   assert.ok(match, `missing embedded export ${name}`);
@@ -60,8 +61,8 @@ try {
   assert.match(embeddedC, /zvm_porf_poll\(exec, provider/);
   assert.doesNotMatch(embeddedC, /\b(?:MEM|porf_mem|porf_heap_cur|zvm_porf_initialized)\b/);
   assert.match(trappedC, /zvm_porf_raise_trap\(exec, provider, ZVM_STATUS_V2_TRAP\)/);
-  assert.match(nestedC, /ignored = p\d+_inner\(exec, provider, status\);\s+if \(\*status != ZVM_STATUS_V2_OK\) return/);
-  assert.match(hostedC, /ignored = porf_box_num\(zvm_porf_host_fail\(exec, provider, status\)\);\s+if \(\*status != ZVM_STATUS_V2_OK\) return/);
+  assert.match(nestedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\).*p\d+_inner\(exec, provider, status\)/);
+  assert.match(hostedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\).*zvm_porf_host_fail\(exec, provider, status\)/);
 
   assert.throws(
     () => compile([ '--zigvm-embedded-v2', '--no-gc', '--module', 'bench/strcat.js' ], join(temp, 'strcat.c')),
@@ -83,60 +84,77 @@ static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id
 int main(void) {
   const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
   zvm_porf_exec_ctx_v2 first = { .capacity = 256 }, second = { .capacity = 256 }, short_arena = { .capacity = 1 }; zvm_status_v2 status = ZVM_STATUS_V2_OK;
+  if (sizeof zvm_porf_static_image != PORF_STATIC_END) return 1;
+  memcpy(first.memory, zvm_porf_static_image, sizeof zvm_porf_static_image);
+  memcpy(second.memory, zvm_porf_static_image, sizeof zvm_porf_static_image);
+  if (*(u32*)(first.memory + 16u) != 11u || memcmp(first.memory + 20u, "per-context", 11u) != 0) return 2;
+  first.memory[20] = 'x';
+  if (second.memory[20] != 'p') return 3;
   jsval a = p1_allocateAndLoop(&first, &provider, &status, JV_UNDEFINED, JV_UNDEFINED, porf_box_num(3));
-  if (status != ZVM_STATUS_V2_OK || (u32)a.val == 0u || first.polls != 3u) return 1;
+  if (status != ZVM_STATUS_V2_OK || (u32)a.val == 0u || first.polls != 3u) return 4;
   status = ZVM_STATUS_V2_OK;
   jsval b = p1_allocateAndLoop(&second, &provider, &status, JV_UNDEFINED, JV_UNDEFINED, porf_box_num(2));
-  if (status != ZVM_STATUS_V2_OK || (u32)b.val == 0u || second.polls != 2u || first.memory[0] != 0u) return 2;
+  if (status != ZVM_STATUS_V2_OK || (u32)b.val == 0u || second.polls != 2u || first.memory[0] != 0u) return 5;
   first.poll_status = ZVM_STATUS_V2_CANCELLED; status = ZVM_STATUS_V2_OK;
   (void)p1_allocateAndLoop(&first, &provider, &status, JV_UNDEFINED, JV_UNDEFINED, porf_box_num(1));
-  if (status != ZVM_STATUS_V2_CANCELLED) return 3;
+  if (status != ZVM_STATUS_V2_CANCELLED) return 6;
   status = ZVM_STATUS_V2_OK;
   (void)p1_allocateAndLoop(&short_arena, &provider, &status, JV_UNDEFINED, JV_UNDEFINED, porf_box_num(1));
-  if (status != ZVM_STATUS_V2_INTERNAL) return 4;
+  if (status != ZVM_STATUS_V2_INTERNAL) return 7;
   return 0;
 }
 `);
-  execFileSync('zig', [ 'cc', `-I${resolve(root, '../../include')}`, harness, '-o', join(temp, 'interleave') ], { cwd: root, stdio: 'pipe' });
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, harness, '-o', join(temp, 'interleave') ], { cwd: root, stdio: 'pipe' });
   execFileSync(join(temp, process.platform === 'win32' ? 'interleave.exe' : 'interleave'), [], { cwd: root, stdio: 'pipe' });
 
   const nestedHarness = join(temp, 'nested_status.c');
   const hostHarness = join(temp, 'host_status.c');
   const nestedSymbol = embeddedSymbol(nestedC, 'nestedTrap');
+  const recursiveSymbol = embeddedSymbol(nestedC, 'recursivePoll');
   const hostSymbol = embeddedSymbol(hostedC, 'hostThenAllocate');
   writeFileSync(nestedHarness, `#include "nested.c"
-struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; unsigned traps; unsigned hosts; };
+struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; unsigned polls; unsigned traps; unsigned hosts; zvm_status_v2 poll_status; };
 static void* base(zvm_porf_exec_ctx_v2* exec) { return exec->memory; }
 static bool reserve(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return bytes <= exec->capacity; }
 static bool commit(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return reserve(exec, bytes); }
+static zvm_status_v2 poll(zvm_porf_exec_ctx_v2* exec, u32 flags) { (void)flags; exec->polls++; return exec->poll_status; }
 static zvm_status_v2 trap(zvm_porf_exec_ctx_v2* exec, u32 code) { (void)code; exec->traps++; return ZVM_STATUS_V2_TRAP; }
 static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id, const zvm_value_v2* args, u32 count, zvm_value_v2* result) { (void)id; (void)args; (void)count; (void)result; exec->hosts++; return ZVM_STATUS_V2_CANCELLED; }
 int main(void) {
-  const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, 0, trap, 0, 0 };
+  const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
   zvm_porf_exec_ctx_v2 exec = { .capacity = 256 }; zvm_status_v2 status = ZVM_STATUS_V2_OK;
   (void)${nestedSymbol}(&exec, &provider, &status, JV_UNDEFINED, JV_UNDEFINED);
-  if (status != ZVM_STATUS_V2_TRAP || exec.traps != 1 || exec.memory[0] != 0) return 1;
+  if (status != ZVM_STATUS_V2_TRAP || exec.polls != 1 || exec.traps != 1 || exec.memory[0] != 0) return 1;
+  exec.poll_status = ZVM_STATUS_V2_CANCELLED; status = ZVM_STATUS_V2_OK;
+  (void)${nestedSymbol}(&exec, &provider, &status, JV_UNDEFINED, JV_UNDEFINED);
+  if (status != ZVM_STATUS_V2_CANCELLED || exec.polls != 2 || exec.traps != 1) return 2;
+  exec.poll_status = ZVM_STATUS_V2_OK; status = ZVM_STATUS_V2_OK;
+  if (${recursiveSymbol}(&exec, &provider, &status, JV_UNDEFINED, JV_UNDEFINED, porf_box_num(2)).val != 2.0 || status != ZVM_STATUS_V2_OK || exec.polls != 5) return 3;
   return 0;
 }
 `);
-  execFileSync('zig', [ 'cc', `-I${resolve(root, '../../include')}`, nestedHarness, '-o', join(temp, 'nested-status') ], { cwd: root, stdio: 'pipe' });
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, nestedHarness, '-o', join(temp, 'nested-status') ], { cwd: root, stdio: 'pipe' });
   execFileSync(join(temp, process.platform === 'win32' ? 'nested-status.exe' : 'nested-status'), [], { cwd: root, stdio: 'pipe' });
 
   writeFileSync(hostHarness, `#include "hosted.c"
-struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; unsigned traps; unsigned hosts; };
+struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; unsigned polls; unsigned traps; unsigned hosts; zvm_status_v2 poll_status; };
 static void* base(zvm_porf_exec_ctx_v2* exec) { return exec->memory; }
 static bool reserve(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return bytes <= exec->capacity; }
 static bool commit(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return reserve(exec, bytes); }
+static zvm_status_v2 poll(zvm_porf_exec_ctx_v2* exec, u32 flags) { (void)flags; exec->polls++; return exec->poll_status; }
 static zvm_status_v2 trap(zvm_porf_exec_ctx_v2* exec, u32 code) { (void)code; exec->traps++; return ZVM_STATUS_V2_TRAP; }
 static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id, const zvm_value_v2* args, u32 count, zvm_value_v2* result) { (void)id; (void)args; (void)count; (void)result; exec->hosts++; return ZVM_STATUS_V2_CANCELLED; }
 int main(void) {
-  const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, 0, trap, 0, 0 };
+  const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
   zvm_porf_exec_ctx_v2 exec = { .capacity = 256 }; zvm_status_v2 status = ZVM_STATUS_V2_OK;
   (void)${hostSymbol}(&exec, &provider, &status, JV_UNDEFINED, JV_UNDEFINED);
-  return status == ZVM_STATUS_V2_CANCELLED && exec.hosts == 1 && exec.memory[0] == 0 ? 0 : 1;
+  if (status != ZVM_STATUS_V2_CANCELLED || exec.polls != 1 || exec.hosts != 1 || exec.memory[0] != 0) return 1;
+  exec.poll_status = ZVM_STATUS_V2_CANCELLED; status = ZVM_STATUS_V2_OK;
+  (void)${hostSymbol}(&exec, &provider, &status, JV_UNDEFINED, JV_UNDEFINED);
+  return status == ZVM_STATUS_V2_CANCELLED && exec.polls == 2 && exec.hosts == 1 ? 0 : 2;
 }
 `);
-  execFileSync('zig', [ 'cc', `-I${resolve(root, '../../include')}`, hostHarness, '-o', join(temp, 'host-status') ], { cwd: root, stdio: 'pipe' });
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, hostHarness, '-o', join(temp, 'host-status') ], { cwd: root, stdio: 'pipe' });
   execFileSync(join(temp, process.platform === 'win32' ? 'host-status.exe' : 'host-status'), [], { cwd: root, stdio: 'pipe' });
 
   const hostRuntime = renderRuntime({ staticEnd: 0, globals: [], hostImports: [ { id: 1, name: 'host', parameters: [], result: 'i32' } ] });

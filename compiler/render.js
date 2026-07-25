@@ -570,14 +570,16 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         const args = node[N_B].map(a => rx(a, P_COMMA)).join(', ');
         // PORF-MOD-002: direct generated calls receive the caller-owned exec tuple.
         const call = embedded && f ? `${name}(${embedded.functionArgs(args)})` : `${name}(${args})`;
-        return [zigvmEnabled ? `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})` : call, P_POSTFIX];
+        // PORF-MOD-004: v2 polls before every generated callee and never calls
+        // it after a non-OK status. Ordinary and legacy code retain their ABI.
+        return [embedded ? embedded.callSafepoint(call, node[N_TYPE]) : zigvmEnabled ? `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})` : call, P_POSTFIX];
       }
 
       case K.HostCall: {
         const args = node[N_B].map(a => rx(a, P_COMMA)).join(', ');
         const name = sanitize(String(node[N_A]));
         const call = embedded ? embedded.hostCall(name, args) : `zvm_porf_host_api->${name}(zvm_porf_host_api->ctx${args ? ', ' + args : ''})`;
-        return [embedded ? call : `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})`, P_POSTFIX];
+        return [embedded ? embedded.callSafepoint(call, node[N_TYPE]) : `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})`, P_POSTFIX];
       }
 
       case K.CallDynamic: {
@@ -957,10 +959,12 @@ static inline void zvm_porf_safepoint(u32 flags) {
   }
   if (usesCoro) head.push(CORO_RUNTIME(usesThreads));
 
-  if (data.length > 0 || fnNameSegs.length > 0) {
+  if (embedded || data.length > 0 || fnNameSegs.length > 0) {
     // static data is constant bytes at fixed offsets: one contiguous image (holes stay
     // zero) init'd by a single memcpy, emitted as string literals (~1 char per ascii byte)
-    const imageBase = 16;
+    // PORF-MOD-003: TASK-005 copies the image to [0, static_end), so v2 must
+    // retain the reserved zero prefix rather than emitting a sliced payload.
+    const imageBase = embedded ? 0 : 16;
     const image = new Uint8Array(dataOffsets.staticEnd - imageBase);
     const writeBytes = (off, bytes) => {
       off -= imageBase;
@@ -1031,7 +1035,8 @@ static inline void zvm_porf_safepoint(u32 flags) {
     }
     if (parts.length > 0 || lines.length === 0) lines.push('"' + parts.join('') + '"');
 
-    head.push(`static const u8 ${embedded ? 'zvm_porf_static_image' : 'porf_data'}[] =\n${lines.join('\n')};\n${init}`);
+    const imageDecl = embedded ? 'zvm_porf_static_image[PORF_STATIC_END]' : 'porf_data[]';
+    head.push(`static const u8 ${imageDecl} =\n${lines.join('\n')};\n${init}`);
   } else {
     if (!embedded) head.push('static void porf_data_init(void) {}\n\n');
   }
