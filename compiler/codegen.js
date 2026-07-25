@@ -1842,6 +1842,7 @@ const generateCall = (scope, decl) => {
   if (name === '__Porffor_coroutine_resume' || name === '__Porffor_coroutine_value')
     return Call(name, decl.arguments.map(a => generate(scope, a)), name === '__Porffor_coroutine_resume' ? T.i32 : T.jsval);
 
+  // PORF-MOD-004: backend-neutral IR hook; v2 renders this through its provider.
   const zigvmHostImport = zigvmHostImports?.get(name);
   if (zigvmHostImport) {
     if (decl._new || decl.arguments.some(x => x?.type === 'SpreadElement'))
@@ -2502,6 +2503,7 @@ const zigvmAbiIrType = (type, label, allowVoid = false) => {
 const objectPropertyName = prop => prop?.key?.name ?? prop?.key?.value;
 const objectProperty = (obj, name) => obj?.properties?.find(x => objectPropertyName(x) === name)?.value;
 
+// PORF-MOD-004: retain stable host IDs in IR without changing ordinary calls.
 const registerZigvmHostImports = (pattern, init) => {
   if (!Prefs.zigvm && !Prefs.zigvmEmbeddedV2) throw new Error('Porffor.dlopen is not yet supported in the native IR backend');
   if (init.arguments[0]?.value !== '__zigvm_host__')

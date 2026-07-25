@@ -1,6 +1,6 @@
 // PORF-MOD-003/004 renderer adapter. Core render.js asks this module for the
 // v2-only spellings, keeping ordinary C and legacy --zigvm text unchanged.
-import { renderRuntime, scanGeneratedC } from './abi.js';
+import { renderRuntime, rewriteGeneratedC, scanGeneratedC } from './abi.js';
 
 export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
   if (!enabled) return null;
@@ -10,9 +10,10 @@ export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
     functionArgs: args => `exec, provider, status${args ? ', ' + args : ''}`,
     memory: () => 'zvm_porf_memory(exec, provider)',
     alloc: (bytes, type) => `zvm_porf_alloc(exec, provider, ${bytes}, ${type})`,
-    poll: (flags, defaultValue) => `if ((*status = zvm_porf_poll(exec, provider, ${flags})) != ZVM_STATUS_V2_OK) return ${defaultValue};`,
+    poll: (flags, defaultValue) => `if (*status == ZVM_STATUS_V2_OK && (*status = zvm_porf_poll(exec, provider, ${flags})) != ZVM_STATUS_V2_OK) return ${defaultValue}; if (*status != ZVM_STATUS_V2_OK) return ${defaultValue};`,
     hostCall: (name, args) => `zvm_porf_host_${name}(exec, provider, status${args ? ', ' + args : ''})`,
     global: name => `zvm_porf_globals(exec, provider)->${name}`,
-    finish: scanGeneratedC
+    trap: (code, defaultValue) => `if (*status == ZVM_STATUS_V2_OK) *status = zvm_porf_raise_trap(exec, provider, ${code}); return ${defaultValue};`,
+    finish: c => scanGeneratedC(rewriteGeneratedC(c))
   };
 };

@@ -6,6 +6,7 @@ import {
 } from './ir.js';
 import { TYPES, TYPE_NAMES } from './types.js';
 import { ieee754_binary64 } from './encoding.js';
+// PORF-MOD-003/004: the isolated adapter owns all v2 state spellings.
 import { createAdapter } from './embedding/zigvm/render.js';
 
 // C type per IR value type
@@ -567,6 +568,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         }
         const name = f ? fnSym(f) : sanitize(String(node[N_A]));
         const args = node[N_B].map(a => rx(a, P_COMMA)).join(', ');
+        // PORF-MOD-002: direct generated calls receive the caller-owned exec tuple.
         const call = embedded && f ? `${name}(${embedded.functionArgs(args)})` : `${name}(${args})`;
         return [zigvmEnabled ? `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})` : call, P_POSTFIX];
       }
@@ -811,11 +813,14 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
       }
 
       case K.Throw:
-        emit(`${ind()}porf_throw(${rx(node[N_A], P_COMMA)});\n`);
+        // PORF-MOD-004: embedded traps return the frozen provider status, never longjmp.
+        if (embedded) emit(`${ind()}${embedded.trap('ZVM_STATUS_V2_TRAP', embeddedReturnDefault)}\n`);
+        else emit(`${ind()}porf_throw(${rx(node[N_A], P_COMMA)});\n`);
         return;
 
       case K.ThrowNew:
-        emit(`${ind()}porf_throw_new(${node[N_A]}, ${rx(node[N_B], P_COMMA)});\n`);
+        if (embedded) emit(`${ind()}${embedded.trap('ZVM_STATUS_V2_TRAP', embeddedReturnDefault)}\n`);
+        else emit(`${ind()}porf_throw_new(${node[N_A]}, ${rx(node[N_B], P_COMMA)});\n`);
         return;
 
       case K.GcBarrier:
@@ -852,6 +857,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const renderFunc = f => {
     const ret = CT[f.retType];
     const params = f.params.map(p => `${CT[p.type]} ${sanitize(p.name)}`).join(', ');
+    // PORF-MOD-002: v2 functions always begin with exec/provider/status.
     emit(`${ret} ${fnSym(f)}(${embedded ? embedded.functionParams(params) : (params || 'void')}) {\n`);
     embeddedReturnDefault = f.retType === T.jsval ? 'JV_UNDEFINED' : f.retType === T.f64 ? '0.0' : '0';
     depth = 1;

@@ -29,7 +29,7 @@ const uwebsockets = (typeof process?.version !== 'undefined' ? (await import('./
 const formatTime = ms => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms.toFixed(0)}ms`;
 const formatSize = bytes => bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)}MB` : `${(bytes / 1000).toFixed(1)}KB`;
 
-const zigvmUnsupportedConstructs = program => {
+const zigvmUnsupportedConstructs = (program, { allowExplicitTrap = false } = {}) => {
   const found = new Map();
   const add = (kind, detail) => {
     if (!found.has(kind)) found.set(kind, detail);
@@ -40,7 +40,8 @@ const zigvmUnsupportedConstructs = program => {
       case 'AwaitExpression': add('async', 'await expression'); break;
       case 'YieldExpression': add('generator', 'yield expression'); break;
       case 'TryStatement': add('try/catch/finally', 'try statement'); break;
-      case 'ThrowStatement': add('throw/unwind', 'throw statement'); break;
+      // PORF-MOD-004: v2 lowers a non-catching throw to provider->raise_trap.
+      case 'ThrowStatement': if (!allowExplicitTrap) add('throw/unwind', 'throw statement'); break;
       case 'NewExpression':
       case 'CallExpression': {
         const callee = node.callee;
@@ -117,7 +118,7 @@ export default (code, module = Prefs.module, run = false) => {
   const t0 = performance.now();
   const program = parse(code);
   if (Prefs.zigvm || embeddedV2) {
-    const unsupported = zigvmUnsupportedConstructs(program);
+    const unsupported = zigvmUnsupportedConstructs(program, { allowExplicitTrap: embeddedV2 });
     if (unsupported.length > 0) {
       const details = unsupported.map(x => `${x.kind} (${x.detail})`).join(', ');
       throw new Error(`unsupported construct in ${embeddedV2 ? '--zigvm-embedded-v2' : '--zigvm v1'}: ${details}`);
@@ -131,6 +132,7 @@ export default (code, module = Prefs.module, run = false) => {
   if (logProgress) progressStart('generating IR...');
   const t1 = performance.now();
   const cg = codegen(program);
+  // PORF-MOD-002: the isolated pass marks the explicit exec call graph.
   if (embeddedV2) lowerExplicitExec(cg);
   if (globalThis.compileCallback) globalThis.compileCallback(cg);
   cg.times = [ t0, t1, performance.now() ];
