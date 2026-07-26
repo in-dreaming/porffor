@@ -37,7 +37,11 @@ export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
     setArrayLength: (array, length) => `*(i32*)(${memory} + (u32)${array}.val) = ${length}`,
     prepare: defaultValue => `if (!zvm_porf_prepare(exec, provider, status)) return ${defaultValue};`,
     statusGuard: defaultValue => `if (*status != ZVM_STATUS_V2_OK) return ${defaultValue};`,
-    trap: (code, defaultValue) => `if (*status == ZVM_STATUS_V2_OK) *status = zvm_porf_raise_trap(exec, provider, ${code}); return ${defaultValue};`,
+    // `__LINE__` is expanded at the emitted trap instruction, not in this
+    // adapter. Source-map generated lines are zero-based, hence the subtract.
+    // Keep this immediately adjacent to raise_trap so a later trap cannot
+    // overwrite the location selected by the runtime exit path.
+    trap: (code, defaultValue) => `if (*status == ZVM_STATUS_V2_OK) { zvm_porf_report_generated_location(exec, __LINE__ - 1u, 0u); *status = zvm_porf_raise_trap(exec, provider, ${code}); } return ${defaultValue};`,
     finish: c => scanGeneratedC(rewriteGeneratedC(c))
   };
 };

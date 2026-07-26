@@ -151,6 +151,9 @@ static inline zvm_status_v2 zvm_porf_poll(zvm_porf_exec_ctx_v2* exec, const zvm_
 static inline zvm_status_v2 zvm_porf_raise_trap(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, u32 code) {
   return provider->raise_trap(exec, code);
 }
+static inline void zvm_porf_report_generated_location(zvm_porf_exec_ctx_v2* exec, u32 generated_line, u32 generated_column) {
+  zvm_porf_report_generated_location_v2(exec, generated_line, generated_column);
+}
 static inline i32 zvm_porf_library_i32(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, const zvm_value_v2* args, u32 arg_count) {
   zvm_value_v2 result = {0};
   if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, arg_count, &result);

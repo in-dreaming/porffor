@@ -88,6 +88,7 @@ try {
   assert.match(embeddedC, /zvm_porf_poll\(exec, provider/);
   assert.doesNotMatch(embeddedC, /\b(?:MEM|porf_mem|porf_heap_cur|zvm_porf_initialized)\b/);
   assert.match(trappedC, /zvm_porf_raise_trap\(exec, provider, ZVM_STATUS_V2_TRAP\)/);
+  assert.match(trappedC, /zvm_porf_report_generated_location\(exec, __LINE__ - 1u, 0u\);\s*\*status = zvm_porf_raise_trap/);
   assert.match(nestedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?p\d+_inner\(exec, provider, status,/);
   assert.match(hostedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?zvm_porf_host_fail\(exec, provider, status\)/);
   assert.match(statusCommitC, /_zvm_status_value_0 = .*zvm_porf_host_fail[\s\S]*?if \(\*status != ZVM_STATUS_V2_OK\) return JV_UNDEFINED;[\s\S]*?zvm_porf_globals\(exec, provider\)->shared = _zvm_status_value_0;/);
@@ -257,6 +258,7 @@ static bool reserve(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return bytes <= exe
 static bool commit(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return reserve(exec, bytes); }
 static zvm_status_v2 poll(zvm_porf_exec_ctx_v2* exec, u32 flags) { (void)flags; exec->polls++; return exec->poll_status; }
 static zvm_status_v2 trap(zvm_porf_exec_ctx_v2* exec, u32 code) { (void)code; exec->traps++; return ZVM_STATUS_V2_TRAP; }
+void zvm_porf_report_generated_location_v2(zvm_porf_exec_ctx_v2* exec, u32 line, u32 column) { (void)exec; (void)line; (void)column; }
 static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id, const zvm_value_v2* args, u32 count, zvm_value_v2* result) { (void)id; (void)args; (void)count; (void)result; exec->hosts++; return ZVM_STATUS_V2_CANCELLED; }
 int main(void) {
   const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
@@ -296,6 +298,7 @@ static bool reserve(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return bytes <= exe
 static bool commit(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return reserve(exec, bytes); }
 static zvm_status_v2 poll(zvm_porf_exec_ctx_v2* exec, u32 flags) { (void)flags; exec->polls++; return exec->poll_status; }
 static zvm_status_v2 trap(zvm_porf_exec_ctx_v2* exec, u32 code) { (void)code; exec->traps++; return ZVM_STATUS_V2_TRAP; }
+void zvm_porf_report_generated_location_v2(zvm_porf_exec_ctx_v2* exec, u32 line, u32 column) { (void)exec; (void)line; (void)column; }
 static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id, const zvm_value_v2* args, u32 count, zvm_value_v2* result) { (void)id; (void)args; (void)count; (void)result; exec->hosts++; return ZVM_STATUS_V2_CANCELLED; }
 int main(void) {
   const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
