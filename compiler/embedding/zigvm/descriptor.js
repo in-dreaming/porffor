@@ -22,7 +22,7 @@ const valueTag = type => type === 'i32' ? 2 : (type === 'f64' || type === 'numbe
 // Authenticated descriptor tail: 64-byte records follow signatures.  The
 // frozen 344-byte header remains unchanged; this flag makes the optional
 // extension unambiguous to the bounds-first artifact decoder.
-const libraryImportExtension = 1;
+const libraryImportExtension = 0x80000000;
 
 const exportIds = prefs => {
   if (prefs.enjinExportIds == null || prefs.enjinExportIds === '') return new Map();
@@ -94,7 +94,9 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   if (imports.some(x => x.value >= exports.length)) profileFailure('ZVM-DESCRIPTOR-007', 'import signature index is unknown');
   const libraryOffset = libraryImportRecords.length ? (signatureOffset + signaturesLength + 3) & ~3 : 0;
   const blob = new Uint8Array(libraryOffset ? libraryOffset + libraryImportRecords.length * 64 : (signatureOffset ? signatureOffset + signaturesLength : tablesEnd));
-  u32(blob, 0, blob.length); u32(blob, 4, 2); u32(blob, 8, 3);
+  // `struct_size` is the frozen header size; the query's required byte count
+  // is the complete descriptor extent, including optional extension tails.
+  u32(blob, 0, header); u32(blob, 4, 2); u32(blob, 8, 3);
   blob.set(hex(prefs.enjinModuleId, 16, '--enjin-module-id'), 24);
   // VersionId and ArtifactContentId are derived after the completed native
   // image exists. Query always exposes a zero-ID template for host rewrite.
