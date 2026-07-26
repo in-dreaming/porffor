@@ -111,7 +111,10 @@ export default (code, module = Prefs.module, run = false) => {
   Prefs.module = module;
   const embeddedV2 = isEmbeddedV2(Prefs);
   validateProfile(Prefs);
-  if (embeddedV2) Prefs.gc = false;
+  // PORF-MOD-007: canonical embedded-v2 inputs authenticate this choice.
+  // GC is not supported by the explicit-exec backend, so accepting and then
+  // overriding it would produce a BuildKey for semantics we did not compile.
+  if (embeddedV2 && Prefs.gc) throw new Error('ZVM-BUILD-002: codegen_options.gc=true is unsupported by embedded-v2');
 
   const optPref = process.argv.find(x => x.startsWith('-O'))?.[2];
 

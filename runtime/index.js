@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { compileCanonicalModuleInput } from '../compiler/embedding/zigvm/module-input.js';
 import '../compiler/prefs.js';
 globalThis.version = 'pre-alpha 1 (ba4813d 2026-07-15)';
 
@@ -81,6 +82,14 @@ const looksLikeModule = (filename, source) => MODULE_SYNTAX_PATTERN.test(source)
 
 entrypoint: {
   const args = process.argv.slice(2);
+  const canonicalInputFlag = args.find(x => x.startsWith('--enjin-module-input='));
+  if (canonicalInputFlag) {
+    // The manifest owns every code-generation choice.  The only remaining
+    // positional syntax is `porf c MANIFEST-OUTPUT`; no ordinary compiler
+    // switch may alter the authenticated compilation.
+    for (const arg of args) if (arg.startsWith('-') && !arg.startsWith('--enjin-module-input='))
+      throw new Error('ZVM-BUILD-010: canonical input is incompatible with ordinary compiler flags');
+  }
   const nonFlagArgs = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '-e' || args[i] === '-p') {
@@ -92,6 +101,7 @@ entrypoint: {
 
   let inputFile = globalThis.file = nonFlagArgs[0];
   let command;
+  let canonicalOutputFile;
   let runAfterCompile = false;
   let runStatus;
   let tmpRunDir;
@@ -128,8 +138,25 @@ entrypoint: {
     if (['native', 'c'].includes(command)) Prefs.target = command;
   }
 
+  // PORF-MOD-007: in `porf c --enjin-module-input=manifest out.c`, the
+  // apparent input position is the requested output, not a fallback source.
+  if (canonicalInputFlag && command) canonicalOutputFile = inputFile;
+
   let source = '';
+  let canonical;
   let sourceProvided = false;
+  if (canonicalInputFlag) {
+    // PORF-MOD-007: the manifest is the sole declared read. Its bundle is the
+    // program passed to the compiler; do not fall back to the positional file.
+    canonical = compileCanonicalModuleInput(fs.readFileSync(canonicalInputFlag.slice('--enjin-module-input='.length), 'utf8'), (bundle, preferences, parsed) => {
+      Object.assign(Prefs, preferences);
+      source = bundle;
+      return parsed;
+    });
+    sourceProvided = true;
+    if (canonicalOutputFile) Prefs.o = canonicalOutputFile;
+    inputFile = globalThis.file = `<module:${canonical.module_id}>`;
+  }
   if (Prefs.e || Prefs.p) {
     const expr = process.argv[(Prefs.e ? process.argv.indexOf('-e') : process.argv.indexOf('-p')) + 1];
     source = expr;
@@ -156,14 +183,20 @@ entrypoint: {
     break entrypoint;
   }
 
-  if (sourceProvided) fs.writeFileSync(inputFile, source);
-    else source = fs.readFileSync(inputFile, 'utf8');
+  if (sourceProvided) {
+    if (!canonicalInputFlag) fs.writeFileSync(inputFile, source);
+  } else {
+    source = fs.readFileSync(inputFile, 'utf8');
+  }
 
   try {
-    if ((Prefs.target === 'c' || Prefs.target === 'native') && DEFAULT_EXPORT_PATTERN.test(source) && source.includes('fetch')) {
+    if (!canonicalInputFlag && (Prefs.target === 'c' || Prefs.target === 'native') && DEFAULT_EXPORT_PATTERN.test(source) && source.includes('fetch')) {
       (await import('./native-fetch.js')).default(inputFile, source);
     } else {
-      const result = (await import('../compiler/index.js')).default(source, Prefs.module ?? looksLikeModule(inputFile, source), runAfterCompile);
+      const compiler = (await import('../compiler/index.js')).default;
+      const result = canonical
+        ? compileCanonicalModuleInput(canonical, bundle => compiler(bundle, canonical.codegen_options.module, false))
+        : compiler(source, Prefs.module ?? looksLikeModule(inputFile, source), runAfterCompile);
       if (result?.runStatus != null) {
         runAfterCompile = false;
         runStatus = result.runStatus;
