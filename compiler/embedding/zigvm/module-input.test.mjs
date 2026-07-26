@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { canonicalBlake3, canonicalOptionsDigest, compileCanonicalModuleInput, parseCanonicalModuleInput } from './module-input.js';
 const provenance = JSON.parse(fs.readFileSync(new URL('../../../../../src/compiler/script_module/build_provenance.json', import.meta.url)));
 const h = n => n.toString(16).padStart(2, '0').repeat(32);
@@ -29,9 +28,11 @@ assert.throws(()=>parseCanonicalModuleInput({...base(), cancelled:true}), /ZVM-B
 assert.throws(()=>parseCanonicalModuleInput({...base(), source_map_utf8:'not json'}),/ZVM-BUILD-009/);
 assert.equal(canonicalBlake3('abc'), '6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85');
 assert.equal(compileCanonicalModuleInput(base(), (bundle, prefs, input) => `${bundle}:${prefs.module}:${input.module_id}`), `${source}:true:${'01'.repeat(16)}`);
-// Exercise the production compiler callback and the narrow CLI route. These
-// runs never give Porffor a physical source path: only the authenticated bundle
-// is compiled and the generated C must not leak the temporary manifest root.
+// Exercise the production compiler callback. These runs never give Porffor a
+// physical source path: only the authenticated bundle is compiled and the
+// generated C must not leak the temporary manifest root. The build target
+// invokes the CLI itself as a direct command below; keeping that process
+// boundary in Zig avoids a Node child-process dependency in restricted CI.
 const roots = [fs.mkdtempSync(path.join(os.tmpdir(), 'zvm-canonical-a-')), fs.mkdtempSync(path.join(os.tmpdir(), 'zvm-canonical-b-'))];
 const outputs = [];
 try { for (const temp of roots) {
@@ -46,20 +47,8 @@ try { for (const temp of roots) {
   });
   assert.match(fs.readFileSync(programmaticOut, 'utf8'), /zvm_porf_module_query_v2/);
   assert.ok(!fs.readFileSync(programmaticOut, 'utf8').includes(temp));
-  const cliOut = path.join(temp, 'cli.c');
-  execFileSync(process.execPath, [
-      'runtime/index.js',
-      'c',
-      `--enjin-module-input=${manifestPath}`,
-      cliOut,
-    ], {
-      cwd: path.resolve(import.meta.dirname, '../../..'),
-    });
   const programmatic = fs.readFileSync(programmaticOut, 'utf8');
-  const cli = fs.readFileSync(cliOut, 'utf8');
-  assert.match(cli, /zvm_porf_module_query_v2/);
-  assert.ok(!cli.includes(temp));
-  outputs.push({ canonical: JSON.stringify(parseCanonicalModuleInput(manifest)), programmatic, cli });
+  outputs.push({ canonical: JSON.stringify(parseCanonicalModuleInput(manifest)), programmatic });
 } assert.deepEqual(outputs[0], outputs[1]);
 } finally { for (const temp of roots) fs.rmSync(temp, { recursive: true, force: true }); }
 console.log('canonical module input: PASS');
