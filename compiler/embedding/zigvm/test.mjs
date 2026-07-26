@@ -12,6 +12,7 @@ import { libraryCall, renderRuntime } from './abi.js';
 import { libraryImports } from './library.js';
 import { buildDescriptor } from './descriptor.js';
 import { createAdapter } from './render.js';
+import { canonicalBlake3 } from './module-input.js';
 
 globalThis.Prefs.zigvmEmbeddedV2 = true;
 globalThis.Prefs.gc = false;
@@ -209,6 +210,38 @@ int main(int argc, char **argv) {
   // query/call, derives and verifies an envelope over this image, normalizes
   // the zero-ID query template, then invokes numeric export 42 via Module.
   execFileSync('zig', [ 'run', '../../src/runtime/porffor_embedded_v2_dll_runner.zig', '--', enjinDll ], { cwd: root, stdio: 'pipe' });
+  // TASK-013 consumes the exact generated throw through Service.invokeLoaded,
+  // not a Zig callback stand-in. The v3 map binds the generated trap-site
+  // report (line 1, column 2) to the canonical logical TS span (5, 7).
+  const trapMap = '{"version":3,"sources":["game/trap.ts"],"names":[],"mappings":";EAKO"}';
+  const trapMapPath = join(temp, 'trap.map');
+  writeFileSync(trapMapPath, trapMap);
+  const trapDll = join(temp, process.platform === 'win32' ? 'trap-module.dll' : 'trap-module.so');
+  const trapC = compile([ ...enjinArgs.filter(x => !x.startsWith('--enjin-source-map-digest=') && !x.startsWith('--enjin-export-ids=')), `--enjin-source-map-digest=${canonicalBlake3(trapMap)}`, '--enjin-export-ids=fail:42', 'compiler/embedding/zigvm/trap_fixture.ts' ], join(temp, 'trap-module.c'));
+  assert.match(trapC, /zvm_porf_report_generated_location\(exec, 1u, 2u\)/);
+  const trapRunner = join(temp, process.platform === 'win32' ? 'trap-runner.exe' : 'trap-runner');
+  execFileSync('zig', [ 'build-exe', '../../src/runtime/porffor_embedded_v2_dll_runner.zig', `-femit-bin=${trapRunner}`, ...(process.platform === 'win32' ? [] : ['-rdynamic']) ], { cwd: root, stdio: 'pipe' });
+  const trapLinkArgs = [ 'cc', '-shared', '-Wl,--export-all-symbols', `-I${includeDir}`, join(temp, 'trap-module.c'), '-o', trapDll ];
+  if (process.platform === 'win32') {
+    const locationShim = join(temp, 'trap-location-shim.c');
+    writeFileSync(locationShim, '#include <stdint.h>\ntypedef void (*report_fn)(void*,uint32_t,uint32_t);\nstatic report_fn report;\nvoid zvm_porf_set_location_reporter_v2(report_fn value){report=value;}\nvoid zvm_porf_report_generated_location_v2(void* exec,uint32_t line,uint32_t column){if(report) report(exec,line,column);}\n');
+    trapLinkArgs.splice(-2, 0, locationShim);
+  }
+  execFileSync('zig', trapLinkArgs, { cwd: root, stdio: 'pipe' });
+  execFileSync(trapRunner, [ trapDll, trapMapPath, 'game/trap.ts', 'trap' ], { cwd: root, stdio: 'pipe' });
+  execFileSync(trapRunner, [ trapDll, '-', 'game/trap.ts', 'trap-missing' ], { cwd: root, stdio: 'pipe' });
+  const wrongMapPath = join(temp, 'trap-wrong.map');
+  writeFileSync(wrongMapPath, '{"version":3,"sources":["game/trap.ts"],"names":[],"mappings":"AAAA"}');
+  execFileSync(trapRunner, [ trapDll, wrongMapPath, 'game/trap.ts', 'trap-wrong-digest' ], { cwd: root, stdio: 'pipe' });
+  const malformedMap = '{';
+  const malformedMapPath = join(temp, 'trap-malformed.map');
+  writeFileSync(malformedMapPath, malformedMap);
+  const malformedDll = join(temp, process.platform === 'win32' ? 'trap-malformed.dll' : 'trap-malformed.so');
+  compile([ ...enjinArgs.filter(x => !x.startsWith('--enjin-source-map-digest=') && !x.startsWith('--enjin-export-ids=')), `--enjin-source-map-digest=${canonicalBlake3(malformedMap)}`, '--enjin-export-ids=fail:42', 'compiler/embedding/zigvm/trap_fixture.ts' ], join(temp, 'trap-malformed.c'));
+  const malformedLinkArgs = [ 'cc', '-shared', '-Wl,--export-all-symbols', `-I${includeDir}`, join(temp, 'trap-malformed.c'), '-o', malformedDll ];
+  if (process.platform === 'win32') malformedLinkArgs.splice(-2, 0, join(temp, 'trap-location-shim.c'));
+  execFileSync('zig', malformedLinkArgs, { cwd: root, stdio: 'pipe' });
+  execFileSync(trapRunner, [ malformedDll, malformedMapPath, 'game/trap.ts', 'trap-malformed' ], { cwd: root, stdio: 'pipe' });
   const registryBase = enjinArgs.filter(x => !x.startsWith('--enjin-import-ids=') && !x.startsWith('--enjin-capability-ids='));
   for (const args of [
     [ '--enjin-import-ids=2:0,2:0' ],
