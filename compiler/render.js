@@ -337,6 +337,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const breakStack = [];
   let activeTryDepth = 0;
   let embeddedValueIndex = 0;
+  let embeddedLoopUpdateIndex = 0;
   let usedLabels = new Set();
 
   const paren = (s, p, need) => p < need ? `(${s})` : s;
@@ -716,20 +717,32 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
       case K.Loop: {
         const cond = node[N_A], update = node[N_B];
         const [stmts, label] = node[N_C];
+        const lowerEmbeddedUpdate = embedded && update != null;
         const updateC = update == null ? null
           : update[N_KIND] === K.Assign
             ? `${update[N_A][N_KIND] === K.Global && embedded ? embedded.global(sanitize(update[N_A][N_A])) : sanitize(update[N_A][N_A])} = ${rx(update[N_B], P_COMMA)}`
             : rx(update, P_COMMA);
-        if (update) emit(`${ind()}for (; ${cond ? rx(cond, P_COMMA) : ''}; ${updateC}) {\n`);
+        const updateLabel = lowerEmbeddedUpdate ? `_zvm_loop_update_${embeddedLoopUpdateIndex++}` : null;
+        if (update) emit(`${ind()}for (; ${cond ? rx(cond, P_COMMA) : ''}; ${lowerEmbeddedUpdate ? '' : updateC}) {\n`);
           else if (cond) emit(`${ind()}while (${rx(cond, P_COMMA)}) {\n`);
         else emit(`${ind()}while (1) {\n`);
-        loopStack.push(label);
+        loopStack.push({ label, continueLabel: updateLabel });
         breakStack.push(label);
         depth++;
         if (embedded) emit(`${ind()}${embedded.poll('ZVM_PORF_SAFEPOINT_BACKEDGE', embeddedReturnDefault)}\n`);
         else if (zigvmEnabled) emit(`${ind()}zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_BACKEDGE);\n`);
         renderStmts(stmts);
-        if (label && usedLabels.has(label + '_c')) emit(`${ind()}${sanitize(label)}_c:;\n`);
+        if (updateLabel) {
+          // PORF-MOD-004: update expressions can set explicit status. Render
+          // them as statements so a failed call cannot commit its fallback
+          // value; the label also preserves C for-loop continue semantics.
+          emit(`${ind()}${updateLabel}:;\n`);
+          if ([ K.Assign, K.Store, K.MemCopy, K.MemFill, K.ArrSet, K.ArrLenSet, K.GcBarrier ].includes(update[N_KIND])) renderStmt(update);
+          else {
+            const value = embeddedValue(update, CT[update[N_TYPE]]);
+            emit(`${ind()}(void)${value};\n`);
+          }
+        } else if (label && usedLabels.has(label + '_c')) emit(`${ind()}${sanitize(label)}_c:;\n`);
         depth--;
         breakStack.pop();
         loopStack.pop();
@@ -746,10 +759,15 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         return;
 
       case K.Continue:
-        if (node[N_A] && node[N_A] !== loopStack[loopStack.length - 1]) {
-          usedLabels.add(node[N_A] + '_c');
-          emit(`${ind()}goto ${sanitize(node[N_A])}_c;\n`);
-        } else emit(`${ind()}continue;\n`);
+        {
+          const current = loopStack[loopStack.length - 1];
+          const target = node[N_A] ? loopStack.findLast(x => x.label === node[N_A]) : current;
+          if (target?.continueLabel) emit(`${ind()}goto ${target.continueLabel};\n`);
+          else if (node[N_A] && node[N_A] !== current.label) {
+            usedLabels.add(node[N_A] + '_c');
+            emit(`${ind()}goto ${sanitize(node[N_A])}_c;\n`);
+          } else emit(`${ind()}continue;\n`);
+        }
         return;
 
       case K.Block: {
@@ -913,6 +931,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
     emit(`${ret} ${fnSym(f)}(${embedded ? embedded.functionParams(params) : (params || 'void')}) {\n`);
     embeddedReturnDefault = f.retType === T.jsval ? 'JV_UNDEFINED' : f.retType === T.f64 ? '0.0' : '0';
     embeddedValueIndex = 0;
+    embeddedLoopUpdateIndex = 0;
     depth = 1;
     activeTryDepth = 0;
     loopStack.length = 0;

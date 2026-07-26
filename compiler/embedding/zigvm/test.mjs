@@ -54,6 +54,7 @@ try {
   const nested = join(temp, 'nested.c');
   const hosted = join(temp, 'hosted.c');
   const statusCommit = join(temp, 'status-commit.c');
+  const loopUpdateCommit = join(temp, 'loop-update-commit.c');
   compile([ '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/modes_fixture.ts' ], ordinary);
   compile([ '--zigvm', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/modes_fixture.ts' ], legacy);
   const embeddedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/stateful_fixture.ts' ], embedded);
@@ -61,6 +62,7 @@ try {
   const nestedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/nested_status_fixture.ts' ], nested);
   const hostedC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/host_status_fixture.ts' ], hosted);
   const statusCommitC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/status_commit_fixture.ts' ], statusCommit);
+  const loopUpdateCommitC = compile([ '--zigvm-embedded-v2', '--no-gc', '--module', '-t', 'compiler/embedding/zigvm/loop_update_status_fixture.ts' ], loopUpdateCommit);
   compileC(ordinary);
   compileC(legacy);
   compileC(embedded);
@@ -68,6 +70,7 @@ try {
   compileC(nested);
   compileC(hosted);
   compileC(statusCommit);
+  compileC(loopUpdateCommit);
 
   assert.match(embeddedC, /zvm_porf_alloc\(exec, provider/);
   assert.match(embeddedC, /zvm_porf_poll\(exec, provider/);
@@ -76,6 +79,8 @@ try {
   assert.match(nestedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?p\d+_inner\(exec, provider, status,/);
   assert.match(hostedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?zvm_porf_host_fail\(exec, provider, status\)/);
   assert.match(statusCommitC, /_zvm_status_value_0 = .*zvm_porf_host_fail[\s\S]*?if \(\*status != ZVM_STATUS_V2_OK\) return JV_UNDEFINED;[\s\S]*?zvm_porf_globals\(exec, provider\)->shared = _zvm_status_value_0;/);
+  assert.match(loopUpdateCommitC, /for \(; .*; \) \{[\s\S]*?_zvm_loop_update_0:;[\s\S]*?_zvm_status_value_\d+ = .*zvm_porf_host_fail[\s\S]*?if \(\*status != ZVM_STATUS_V2_OK\) return JV_UNDEFINED;[\s\S]*?zvm_porf_globals\(exec, provider\)->shared = _zvm_status_value_\d+;/);
+  assert.match(loopUpdateCommitC, /if \(i == 0\.0\) \{[\s\S]*?goto _zvm_loop_update_0;[\s\S]*?_zvm_loop_update_0:;[\s\S]*?i = _zvm_status_value_\d+;/);
 
   assert.throws(
     () => compile([ '--zigvm-embedded-v2', '--no-gc', '--module', 'bench/strcat.js' ], join(temp, 'strcat.c')),
@@ -196,14 +201,39 @@ int main(void) {
   execFileSync('zig', [ 'cc', `-I${includeDir}`, statusCommitHarness, '-o', executablePath('status-commit') ], { cwd: root, stdio: 'pipe' });
   runCompiled('status-commit');
 
+  const loopUpdateCommitHarness = join(temp, 'loop-update-commit.c.test.c');
+  const loopUpdateSymbol = embeddedSymbol(loopUpdateCommitC, 'forUpdateAssignment');
+  const continueSymbol = embeddedSymbol(loopUpdateCommitC, 'continueUpdate');
+  writeFileSync(loopUpdateCommitHarness, `#include "loop-update-commit.c"
+struct zvm_porf_exec_ctx_v2 { unsigned char memory[256]; unsigned capacity; zvm_status_v2 host_status; };
+static void* base(zvm_porf_exec_ctx_v2* exec) { return exec->memory; }
+static bool reserve(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return bytes <= exec->capacity; }
+static bool commit(zvm_porf_exec_ctx_v2* exec, u32 bytes) { return reserve(exec, bytes); }
+static zvm_status_v2 poll(zvm_porf_exec_ctx_v2* exec, u32 flags) { (void)exec; (void)flags; return ZVM_STATUS_V2_OK; }
+static zvm_status_v2 trap(zvm_porf_exec_ctx_v2* exec, u32 code) { (void)exec; (void)code; return ZVM_STATUS_V2_TRAP; }
+static zvm_status_v2 host(zvm_porf_exec_ctx_v2* exec, zvm_host_function_id_v2 id, const zvm_value_v2* args, u32 count, zvm_value_v2* result) { (void)id; (void)args; (void)count; (void)result; return exec->host_status; }
+static int check(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2 failure) {
+  zvm_status_v2 status = ZVM_STATUS_V2_OK;
+  zvm_porf_globals(exec, provider)->shared = porf_box_num(41);
+  exec->host_status = failure;
+  (void)${loopUpdateSymbol}(exec, provider, &status, JV_UNDEFINED, JV_UNDEFINED);
+  return status == failure && zvm_porf_globals(exec, provider)->shared.val == 41.0;
+}
+int main(void) {
+  const zvm_porf_provider_api_v1 provider = { sizeof provider, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, 0, 0, host, poll, trap, 0, 0 };
+  zvm_porf_exec_ctx_v2 exec = { .capacity = 256 };
+  if (!check(&exec, &provider, ZVM_STATUS_V2_TRAP) || !check(&exec, &provider, ZVM_STATUS_V2_CANCELLED) || !check(&exec, &provider, ZVM_STATUS_V2_BUDGET_EXCEEDED)) return 1;
+  zvm_status_v2 status = ZVM_STATUS_V2_OK;
+  exec.host_status = ZVM_STATUS_V2_OK;
+  return ${continueSymbol}(&exec, &provider, &status, JV_UNDEFINED, JV_UNDEFINED).val == 1.0 && status == ZVM_STATUS_V2_OK ? 0 : 2;
+}
+`);
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, loopUpdateCommitHarness, '-o', executablePath('loop-update-commit') ], { cwd: root, stdio: 'pipe' });
+  runCompiled('loop-update-commit');
+
   const hostRuntime = renderRuntime({ staticEnd: 0, globals: [], hostImports: [ { id: 1, name: 'host', parameters: [], result: 'i32' } ] });
   assert.match(hostRuntime, /if \(\*status == ZVM_STATUS_V2_OK\) \*status = provider->host_dispatch/);
   assert.match(hostRuntime, /provider->raise_trap/);
-} catch (error) {
-  // Repository-inspection sandboxes can deny Node spawning the nested compiler.
-  // Keep the in-process structural assertions useful there; CI runs the full
-  // generated-C harness when child processes are available.
-  if (error?.code !== 'EPERM') throw error;
 } finally {
   rmSync(temp, { recursive: true, force: true });
 }
