@@ -5,7 +5,7 @@ import {
   Reinterpret, Box, JvType, JvNum, JvPtr, Eq, Add, Cmp, JvTruthy, JvFalsy, JvNullish,
   Load, Store, MemCopy, MemFill,
   If, Loop, Break, Continue, BlockStmt, TypeSwitch, Return, Unreachable,
-  Call, HostCall, CallDynamic, Try, Throw, ThrowNew, Await, Yield,
+  Call, HostCall, LibraryCall, CallDynamic, Try, Throw, ThrowNew, Await, Yield,
   Alloc, GcBarrier, ArrGet, ArrSet, ArrLenSet, LenGet, LenSet, RawC
 } from './ir.js';
 import { BuiltinFuncs, BuiltinVars } from './builtins.js';
@@ -15,6 +15,7 @@ import parse from './parse.js';
 import temporalPolyfillSource from './temporal.js';
 import { log } from './log.js';
 import './prefs.js';
+import { libraryImportById } from './embedding/zigvm/library.js';
 
 // jsval constants
 const valNum = x => Const(T.jsval, x);
@@ -1853,6 +1854,15 @@ const generateCall = (scope, decl) => {
       coerceValue(generate(scope, arg), zigvmAbiIrType(zigvmHostImport.parameters[i], `${name} parameter ${i}`)));
     return HostCall(zigvmHostImport.name, args, zigvmAbiIrType(zigvmHostImport.result, `${name} result`, true));
   }
+  const zigvmLibraryImport = zigvmLibraryImports?.get(name);
+  if (zigvmLibraryImport) {
+    if (decl._new || decl.arguments.some(x => x?.type === 'SpreadElement'))
+      throw new Error(`ScriptLibrary import ${name} does not support constructor or spread calls`);
+    if (decl.arguments.length !== zigvmLibraryImport.parameters.length)
+      throw new Error(`ScriptLibrary import ${name} expects ${zigvmLibraryImport.parameters.length} arguments, got ${decl.arguments.length}`);
+    const args = decl.arguments.map((arg, i) => coerceValue(generate(scope, arg), zigvmAbiIrType(zigvmLibraryImport.parameters[i], `${name} parameter ${i}`)));
+    return LibraryCall(zigvmLibraryImport.id, args, zigvmAbiIrType(zigvmLibraryImport.result, `${name} result`, true));
+  }
 
   // eval('known/literal string') -> inline the parsed program
   if (!decl._funcIdx && !decl._new && (name === 'eval' || (decl.callee.type === 'SequenceExpression' && decl.callee.expressions.at(-1)?.name === 'eval'))) {
@@ -2506,12 +2516,15 @@ const objectProperty = (obj, name) => obj?.properties?.find(x => objectPropertyN
 // PORF-MOD-004: retain stable host IDs in IR without changing ordinary calls.
 const registerZigvmHostImports = (pattern, init) => {
   if (!Prefs.zigvm && !Prefs.zigvmEmbeddedV2 && !Prefs.enjinModule) throw new Error('Porffor.dlopen is not yet supported in the native IR backend');
-  if (init.arguments[0]?.value !== '__zigvm_host__')
-    throw new Error(`--zigvm only supports Porffor.dlopen("__zigvm_host__", ...)`);
+  const isLibrary = init.arguments[0]?.value === '__zigvm_library__';
+  if (init.arguments[0]?.value !== '__zigvm_host__' && !isLibrary)
+    throw new Error(`--zigvm only supports Porffor.dlopen("__zigvm_host__", ...) or product ScriptLibrary imports`);
+  if (isLibrary && !Prefs.enjinModule) throw new Error('ScriptLibrary imports require --enjin-module');
   if (pattern.type !== 'ObjectPattern' || init.arguments[1]?.type !== 'ObjectExpression')
     throw new Error('zigvm host imports require object destructuring and a literal ABI schema');
 
   const schema = init.arguments[1];
+  const manifest = isLibrary ? libraryImportById(Prefs) : null;
   for (const binding of pattern.properties) {
     const sourceName = objectPropertyName(binding);
     const localName = binding.value?.name;
@@ -2530,7 +2543,11 @@ const registerZigvmHostImports = (pattern, init) => {
     zigvmAbiIrType(result, `${localName} result`, true);
     if ((Prefs.zigvmEmbeddedV2 || Prefs.enjinModule) && (!Number.isInteger(id) || id <= 0 || id > 0xffffffff))
       throw new Error(`embedded v2 host import ${localName} requires a stable positive numeric id`);
-    zigvmHostImports.set(localName, { name: sourceName, parameters, result, id });
+    if (isLibrary) {
+      const target = manifest.get(id);
+      if (!target || sourceName !== localName) throw new Error(`ScriptLibrary import ${localName} must name a declared ImportId`);
+      zigvmLibraryImports.set(localName, { ...target, parameters, result });
+    } else zigvmHostImports.set(localName, { name: sourceName, parameters, result, id });
   }
 };
 
@@ -5035,7 +5052,7 @@ const inferDirectCallParamTypes = root => {
   if (root?.type === 'Program') visitBody(root.body);
 };
 
-let globals, funcs, funcsByIndex, funcIndex, funcNameCollisions, currentFuncIndex, depth, data, dataCache, rawHead, builtinGlobalInits, includedBuiltinGlobalInits, usedTypes, globalInfer, builtinFuncs, builtinVars, builtinPrototypeFuncs, builtinPrototypeGetters, builtinPrototypeObjectGetters, topLevelFunc, zigvmHostImports;
+let globals, funcs, funcsByIndex, funcIndex, funcNameCollisions, currentFuncIndex, depth, data, dataCache, rawHead, builtinGlobalInits, includedBuiltinGlobalInits, usedTypes, globalInfer, builtinFuncs, builtinVars, builtinPrototypeFuncs, builtinPrototypeGetters, builtinPrototypeObjectGetters, topLevelFunc, zigvmHostImports, zigvmLibraryImports;
 
 export default (program, opts = {}) => {
   const entryName = opts.entryName ?? '#main';
@@ -5049,6 +5066,7 @@ export default (program, opts = {}) => {
   dataCache = new Map();
   rawHead = [];
   zigvmHostImports = new Map();
+  zigvmLibraryImports = new Map();
   builtinGlobalInits = [];
   includedBuiltinGlobalInits = new Set();
   irFinalizers = [];

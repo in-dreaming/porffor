@@ -11,7 +11,8 @@ export const checkGameplayProfile = program => {
     node.callee?.type === 'MemberExpression' && !node.callee.computed &&
     node.callee.object?.type === 'Identifier' && node.callee.object.name === 'Porffor' &&
     node.callee.property?.type === 'Identifier' && node.callee.property.name === 'dlopen' &&
-    node.arguments?.[0]?.type === 'Literal' && node.arguments[0].value === '__zigvm_host__';
+    node.arguments?.[0]?.type === 'Literal' &&
+    (node.arguments[0].value === '__zigvm_host__' || node.arguments[0].value === '__zigvm_library__');
   const visit = (node, topLevel = false) => {
     if (!node || typeof node !== 'object') return;
     if (canonicalHostCall(node)) {

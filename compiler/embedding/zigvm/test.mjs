@@ -89,13 +89,18 @@ try {
   );
 
   const enjin = join(temp, 'enjin-module.c');
+  const library = join(temp, 'library-module.c');
   const enjinArgs = [ '--enjin-module', '--no-gc', '--module', '-t', '--enjin-module-id=01010101010101010101010101010101', '--enjin-provider-id=02020202020202020202020202020202', '--enjin-provider-abi-digest=0303030303030303030303030303030303030303030303030303030303030303', '--enjin-public-interface-digest=0606060606060606060606060606060606060606060606060606060606060606', '--enjin-source-map-digest=0707070707070707070707070707070707070707070707070707070707070707', '--enjin-scratch-min=8', '--enjin-scratch-max=64', '--enjin-scratch-alignment=8', '--enjin-export-ids=add:42', '--enjin-import-ids=9:0,3:0', '--enjin-capability-ids=7:42,2:9' ];
   const enjinC = compile([ ...enjinArgs, '../../test/porffor/v2_fixture.ts' ], enjin);
+  const libraryC = compile([ ...enjinArgs, '--enjin-library-imports=5:11111111111111111111111111111111:7:0:2222222222222222222222222222222222222222222222222222222222222222:required', '--enjin-export-ids=run:42', 'compiler/embedding/zigvm/library_fixture.ts' ], library);
   compileC(enjin);
+  compileC(library);
   assert.match(enjinC, /zvm_porf_module_query_v2\(void\* out, u32 capacity, u32\* required\)/);
   assert.match(enjinC, /case 42u:/);
   assert.match(enjinC, /0x03u, 0x00u, 0x00u, 0x00u/);
   assert.match(enjinC, /zvm_porf_call_v2\(zvm_porf_exec_ctx_v2\* exec, u32 export_id/);
+  assert.match(libraryC, /zvm_porf_library_i32\(exec, provider, status, 5u/);
+  assert.match(libraryC, /0x80000000u \| import_id/);
   const enjinDll = join(temp, process.platform === 'win32' ? 'enjin-module.dll' : 'enjin-module.so');
   execFileSync('zig', [ 'cc', '-shared', '-Wl,--export-all-symbols', `-I${includeDir}`, enjin, '-o', enjinDll ], { cwd: root, stdio: 'pipe' });
   const dllHarness = join(temp, 'enjin_dll_harness.c');

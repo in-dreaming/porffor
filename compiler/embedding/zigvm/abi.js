@@ -13,6 +13,16 @@ export const validateProfile = prefs => {
 
 const cType = type => ({ i32: 'i32', f64: 'f64', void: 'void' })[type];
 
+// Library calls are not normal Host capabilities.  The high-bit namespace is
+// reserved for manifest ImportIds; the invocation-local Host router resolves
+// that ID through the caller's active DispatchSnapshot and forwards the same
+// exec/budget/status chain to ScriptLibrary.  No generated pointer survives a
+// snapshot boundary.
+export const libraryCall = (id, args, type) => {
+  if (type !== 2 || args.length !== 1) throw new Error('embedded ScriptLibrary v1 lowering currently requires one i32 argument and i32 result');
+  return `zvm_porf_library_i32(exec, provider, status, ${id}u, ${args[0]})`;
+};
+
 export const renderRuntime = ({ staticEnd, globals, hostImports }) => {
   const fields = globals.map(g => `  ${g.type === 1 ? 'f64' : g.type === 6 ? 'jsval' : 'u32'} ${g.name};`);
   const host = hostImports.map(imported => {
@@ -132,6 +142,13 @@ static inline zvm_status_v2 zvm_porf_poll(zvm_porf_exec_ctx_v2* exec, const zvm_
 }
 static inline zvm_status_v2 zvm_porf_raise_trap(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, u32 code) {
   return provider->raise_trap(exec, code);
+}
+static inline i32 zvm_porf_library_i32(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, i32 value) {
+  zvm_value_v2 args[1] = { { ZVM_VALUE_V2_I32, 0u, (u64)(i64)value } };
+  zvm_value_v2 result = {0};
+  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, 1u, &result);
+  if (*status != ZVM_STATUS_V2_OK || result.tag != ZVM_VALUE_V2_I32 || result.aux != 0u) return 0;
+  return (i32)result.payload;
 }
 ${host}
 `;

@@ -1,6 +1,6 @@
 // PORF-MOD-003/004 renderer adapter. Core render.js asks this module for the
 // v2-only spellings, keeping ordinary C and legacy --zigvm text unchanged.
-import { renderRuntime, rewriteGeneratedC, scanGeneratedC } from './abi.js';
+import { renderRuntime, rewriteGeneratedC, scanGeneratedC, libraryCall } from './abi.js';
 
 export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
   if (!enabled) return null;
@@ -26,6 +26,7 @@ export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
       return `((*status == ZVM_STATUS_V2_OK && (*status = zvm_porf_poll(exec, provider, ZVM_PORF_SAFEPOINT_CALL)) == ZVM_STATUS_V2_OK) ? (${call}) : ${fallback})`;
     },
     hostCall: (name, args) => `zvm_porf_host_${name}(exec, provider, status${args ? ', ' + args : ''})`,
+    libraryCall,
     global: name => `zvm_porf_globals(exec, provider)->${name}`,
     // Array layout is a v2 arena concern. Keep its address arithmetic and
     // boxed-value packing out of the upstream renderer with the rest of the

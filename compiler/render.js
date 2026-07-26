@@ -376,8 +376,8 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         const kind = node[N_KIND];
         if (kind === K.Loop) {
           zigvmSafepoints.push({ function: funcName, kind: 'backedge', flag: 2, opcode_index: opcodeIndex });
-        } else if (kind === K.Call || kind === K.HostCall || kind === K.CallDynamic) {
-          const target = kind === K.Call ? String(node[N_A]) : kind === K.HostCall ? String(node[N_A]) : 'dynamic';
+        } else if (kind === K.Call || kind === K.HostCall || kind === K.LibraryCall || kind === K.CallDynamic) {
+          const target = kind === K.Call ? String(node[N_A]) : kind === K.HostCall ? String(node[N_A]) : kind === K.LibraryCall ? `library:${node[N_A]}` : 'dynamic';
           zigvmSafepoints.push({ function: funcName, kind: 'call', flag: 4, target, opcode_index: opcodeIndex });
         }
         opcodeIndex++;
@@ -584,6 +584,13 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
         const name = sanitize(String(node[N_A]));
         const call = embedded ? embedded.hostCall(name, args) : `zvm_porf_host_api->${name}(zvm_porf_host_api->ctx${args ? ', ' + args : ''})`;
         return [embedded ? embedded.callSafepoint(call, node[N_TYPE]) : `(zvm_porf_safepoint(ZVM_PORF_SAFEPOINT_CALL), ${call})`, P_POSTFIX];
+      }
+
+      case K.LibraryCall: {
+        if (!embedded) throw new Error('ScriptLibrary calls require the embedded v2 profile');
+        const args = node[N_B].map(a => rx(a, P_COMMA));
+        const call = embedded.libraryCall(node[N_A], args, node[N_TYPE]);
+        return [embedded.callSafepoint(call, node[N_TYPE]), P_POSTFIX];
       }
 
       case K.CallDynamic: {

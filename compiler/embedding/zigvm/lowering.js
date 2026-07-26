@@ -6,7 +6,7 @@ import { K, FX, N_A, N_B, N_C, N_FX } from '../../ir.js';
 
 const statefulKinds = new Set([
   K.Load, K.Store, K.MemCopy, K.MemFill, K.Alloc,
-  K.HostCall, K.Throw, K.ThrowNew
+  K.HostCall, K.LibraryCall, K.Throw, K.ThrowNew
 ]);
 
 const visit = (node, directCalls) => {

@@ -40,3 +40,5 @@ export const lowerLibraryImports = (cg, prefs) => {
   cg.zigvmLibraryImports = imports;
   return imports;
 };
+
+export const libraryImportById = prefs => new Map(libraryImports(prefs).map(item => [item.id, item]));

@@ -116,7 +116,9 @@ export const K = {
   Reserved: k++,
   JvFalsy: k++,  // a: jsval -> i32
   JvNullish: k++, // a: jsval -> i32
-  HostCall: k++  // a: zigvm host import name, b: args[]
+  HostCall: k++, // a: zigvm host import name, b: args[]
+  // PORF-MOD-008: manifest-addressed ScriptLibrary call; never a pointer.
+  LibraryCall: k++
 };
 
 export const KNames = [];
@@ -354,6 +356,11 @@ export const HostCall = (name, args, retType = T.jsval) => {
   let fx = FX.call;
   for (let i = 0; i < args.length; i++) fx |= fxOf(args[i]);
   return [K.HostCall, retType, fx, name, args, 0];
+};
+export const LibraryCall = (id, args, retType = T.jsval) => {
+  let fx = FX.call;
+  for (let i = 0; i < args.length; i++) fx |= fxOf(args[i]);
+  return [K.LibraryCall, retType, fx, id, args, 0];
 };
 // newTarget: expr|null (plain call). spreadArr: array jv expr|null (argv from its entries instead of args)
 export const CallDynamic = (fn, thisArg, args, newTarget = null, spreadArr = null) => {
