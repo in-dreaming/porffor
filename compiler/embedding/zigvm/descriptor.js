@@ -19,7 +19,7 @@ const u32Pref = (prefs, key, fallback = 0) => {
   return Number(value);
 };
 const valueTag = type => type === 'i32' ? 2 : (type === 'f64' || type === 'number') ? 3 : type === 'void' ? 0 : null;
-// Authenticated descriptor tail: 64-byte records follow signatures.  The
+// Authenticated descriptor tail: 80-byte records follow signatures.  The
 // frozen 344-byte header remains unchanged; this flag makes the optional
 // extension unambiguous to the bounds-first artifact decoder.
 const libraryImportExtension = 0x80000000;
@@ -93,7 +93,7 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   const signatureOffset = exports.length ? (tablesEnd + 3) & ~3 : 0;
   if (imports.some(x => x.value >= exports.length)) profileFailure('ZVM-DESCRIPTOR-007', 'import signature index is unknown');
   const libraryOffset = libraryImportRecords.length ? (signatureOffset + signaturesLength + 3) & ~3 : 0;
-  const blob = new Uint8Array(libraryOffset ? libraryOffset + libraryImportRecords.length * 64 : (signatureOffset ? signatureOffset + signaturesLength : tablesEnd));
+  const blob = new Uint8Array(libraryOffset ? libraryOffset + libraryImportRecords.length * 80 : (signatureOffset ? signatureOffset + signaturesLength : tablesEnd));
   // `struct_size` is the frozen header size; the query's required byte count
   // is the complete descriptor extent, including optional extension tails.
   u32(blob, 0, header); u32(blob, 4, 2); u32(blob, 8, 3);
@@ -125,7 +125,7 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   // data, not generated-C comments.  The normal import table above owns the
   // signature index; this tail maps its ImportId to target and policy.
   libraryImportRecords.forEach((item, index) => {
-    const at = libraryOffset + index * 64;
+    const at = libraryOffset + index * 80;
     u32(blob, at, item.id); u32(blob, at + 4, item.exportId);
     blob.set(hex(item.moduleId, 16, 'ScriptLibrary ModuleId'), at + 8);
     blob.set(hex(item.interfaceDigest, 32, 'ScriptLibrary interface digest'), at + 24);
