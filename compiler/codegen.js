@@ -5199,6 +5199,12 @@ export default (program, opts = {}) => {
     entry: entryName,
     prefs: rawHead.length ? { ...Prefs, rawHead: [ Prefs.rawHead, ...rawHead ].filter(Boolean).join('\n') } : Prefs,
     usedTypes,
-    zigvm: (Prefs.zigvm || Prefs.zigvmEmbeddedV2 || Prefs.enjinModule) ? { hostImports: [ ...zigvmHostImports.values() ] } : null
+    zigvm: (Prefs.zigvm || Prefs.zigvmEmbeddedV2 || Prefs.enjinModule) ? {
+      hostImports: [ ...zigvmHostImports.values() ],
+      // PORF-MOD-008: the product descriptor authenticates the ABI declared
+      // at each ScriptLibrary import site.  Keep this small data hand-off
+      // backend-only; ordinary module/import lowering remains unchanged.
+      libraryImports: [ ...zigvmLibraryImports.values() ]
+    } : null
   };
 };

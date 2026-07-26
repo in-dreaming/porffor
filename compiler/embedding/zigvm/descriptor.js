@@ -19,6 +19,8 @@ const u32Pref = (prefs, key, fallback = 0) => {
   return Number(value);
 };
 const valueTag = type => type === 'i32' ? 2 : (type === 'f64' || type === 'number') ? 3 : type === 'void' ? 0 : null;
+const signatureKey = ({ params, result }) => `${params.join(',')}->${result}`;
+const signatureLength = ({ params }) => 12 + params.length * 4;
 // Authenticated descriptor tail: 80-byte records follow signatures.  The
 // frozen 344-byte header remains unchanged; this flag makes the optional
 // extension unambiguous to the bounds-first artifact decoder.
@@ -75,23 +77,46 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   if (ids.size !== exports.length) profileFailure('ZVM-DESCRIPTOR-005', 'registry contains an unknown export');
   exports.sort((a, b) => a.id - b.id);
   const imports = numericPairs(prefs, 'enjinImportIds', 'ImportId:signatureIndex');
-  const libraryImportRecords = libraryImports(prefs);
+  const libraryDeclarations = zigvm?.libraryImports ?? [];
+  const declarationsById = new Map(libraryDeclarations.map(item => [item.id, item]));
+  const libraryImportRecords = libraryImports(prefs).map(item => {
+    const declaration = declarationsById.get(item.id);
+    if (!declaration) profileFailure('ZVM-DESCRIPTOR-007', `ScriptLibrary ImportId ${item.id} is not declared by source`);
+    const params = declaration.parameters ?? [];
+    const result = declaration.result;
+    if (params.length > 0xffff || params.some(type => valueTag(type) == null || type === 'void') || valueTag(result) == null)
+      profileFailure('ZVM-DESCRIPTOR-004', `ScriptLibrary ImportId ${item.id} has an unsupported ABI schema`);
+    return { ...item, params, result };
+  });
+  if (declarationsById.size !== libraryImportRecords.length)
+    profileFailure('ZVM-DESCRIPTOR-007', 'source declares an unknown ScriptLibrary ImportId');
   for (const item of libraryImportRecords) {
     if (imports.some(existing => existing.id === item.id))
       profileFailure('ZVM-DESCRIPTOR-007', `ScriptLibrary ImportId ${item.id} duplicates --enjin-import-ids`);
-    imports.push({ id: item.id, value: item.signatureIndex });
   }
+  // The signature table is an authenticated canonical list: exports first in
+  // ExportId order, then ScriptLibrary imports in ImportId order.  Library
+  // records therefore cannot alias an unrelated local export signature.
+  const signatures = exports.map(item => ({ params: item.params, result: item.result }));
+  libraryImportRecords.forEach((item, index) => {
+    const expected = signatures.length;
+    if (item.signatureIndex !== expected)
+      profileFailure('ZVM-DESCRIPTOR-007', `ScriptLibrary ImportId ${item.id} signature index ${item.signatureIndex} does not match declared ABI schema ${signatureKey(item)} (expected ${expected})`);
+    item.signatureIndex = expected;
+    signatures.push({ params: item.params, result: item.result });
+    imports.push({ id: item.id, value: item.signatureIndex });
+  });
   imports.sort((a, b) => a.id - b.id);
   const capabilities = numericPairs(prefs, 'enjinCapabilityIds', 'CapabilityId:HostFunctionId');
   if (capabilities.some(x => x.value === 0)) profileFailure('ZVM-DESCRIPTOR-007', 'HostFunctionId must be nonzero');
   const header = 344, exportOffset = exports.length ? header : 0;
   let signaturesLength = 0;
-  for (const item of exports) signaturesLength += 12 + item.params.length * 4;
+  for (const item of signatures) signaturesLength += signatureLength(item);
   const importOffset = imports.length ? (header + exports.length * 8 + 3) & ~3 : 0;
   const capabilityOffset = capabilities.length ? ((importOffset ? importOffset + imports.length * 8 : header + exports.length * 8) + 3) & ~3 : 0;
   const tablesEnd = capabilityOffset ? capabilityOffset + capabilities.length * 8 : importOffset ? importOffset + imports.length * 8 : header + exports.length * 8;
-  const signatureOffset = exports.length ? (tablesEnd + 3) & ~3 : 0;
-  if (imports.some(x => x.value >= exports.length)) profileFailure('ZVM-DESCRIPTOR-007', 'import signature index is unknown');
+  const signatureOffset = signatures.length ? (tablesEnd + 3) & ~3 : 0;
+  if (imports.some(x => x.value >= signatures.length)) profileFailure('ZVM-DESCRIPTOR-007', 'import signature index is unknown');
   const libraryOffset = libraryImportRecords.length ? (signatureOffset + signaturesLength + 3) & ~3 : 0;
   const blob = new Uint8Array(libraryOffset ? libraryOffset + libraryImportRecords.length * 80 : (signatureOffset ? signatureOffset + signaturesLength : tablesEnd));
   // `struct_size` is the frozen header size; the query's required byte count
@@ -104,7 +129,7 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   blob.set(hex(prefs.enjinProviderAbiDigest, 32, '--enjin-provider-abi-digest'), 120);
   u64(blob, 16, prefs.enjinRequiredFeatures ?? 0, '--enjin-required-features');
   u64(blob, 152, prefs.enjinProviderRequiredFeatures ?? 0, '--enjin-provider-required-features');
-  u32(blob, 160, 1); u32(blob, 164, 1); u32(blob, 176, exportOffset); u32(blob, 180, exports.length); u32(blob, 184, importOffset); u32(blob, 188, imports.length); u32(blob, 192, capabilityOffset); u32(blob, 196, capabilities.length); u32(blob, 216, signatureOffset); u32(blob, 220, exports.length);
+  u32(blob, 160, 1); u32(blob, 164, 1); u32(blob, 176, exportOffset); u32(blob, 180, exports.length); u32(blob, 184, importOffset); u32(blob, 188, imports.length); u32(blob, 192, capabilityOffset); u32(blob, 196, capabilities.length); u32(blob, 216, signatureOffset); u32(blob, 220, signatures.length);
   const scratchMin = u32Pref(prefs, 'enjinScratchMin');
   const scratchMax = u32Pref(prefs, 'enjinScratchMax');
   const scratchAlignment = u32Pref(prefs, 'enjinScratchAlignment', 8);
@@ -119,10 +144,12 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   let signatureAt = signatureOffset;
   exports.forEach((item, index) => {
     u32(blob, exportOffset + index * 8, item.id); u32(blob, exportOffset + index * 8 + 4, index);
+  });
+  signatures.forEach(item => {
     u16(blob, signatureAt, 1); u16(blob, signatureAt + 4, item.params.length);
     item.params.forEach((type, i) => u32(blob, signatureAt + 8 + i * 4, valueTag(type)));
     u32(blob, signatureAt + 8 + item.params.length * 4, valueTag(item.result));
-    signatureAt += 12 + item.params.length * 4;
+    signatureAt += signatureLength(item);
   });
   imports.forEach((item, index) => { u32(blob, importOffset + index * 8, item.id); u32(blob, importOffset + index * 8 + 4, item.value); });
   // PORF-MOD-008: full ScriptLibrary contracts are authenticated descriptor
