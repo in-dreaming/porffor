@@ -20,7 +20,10 @@ export const libraryImports = prefs => {
   for (const item of String(text).split(',')) {
     const [idText, moduleId, exportText, signatureText, digest, requirement, extra] = item.split(':');
     const id = Number(idText), exportId = Number(exportText), signatureIndex = Number(signatureText);
-    if (extra != null || !Number.isInteger(id) || id <= 0 || id > 0xffffffff || ids.has(id) ||
+    // The high bit is the generated HostFunctionId dispatch namespace.  It
+    // is not part of ImportId, otherwise `1` and `0x80000001` alias after
+    // the runtime strips the dispatch bit.
+    if (extra != null || !Number.isInteger(id) || id <= 0 || id > 0x7fffffff || ids.has(id) ||
         !Number.isInteger(exportId) || exportId <= 0 || exportId > 0xffffffff ||
         !Number.isInteger(signatureIndex) || signatureIndex < 0 || signatureIndex > 0xffffffff ||
         (requirement !== 'required' && requirement !== 'optional'))

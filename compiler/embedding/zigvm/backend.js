@@ -9,9 +9,6 @@ export const appendEnjinModule = (c, cg) => {
   // product ABI entry points appended below are query and numeric call.
   c = c.replace(/\n(?!(?:static ))(jsval|i32|u32|f64|void) (p\d+_[A-Za-z0-9_]+)\(/g, '\nstatic $1 $2(');
   const { blob, exports } = buildDescriptor(cg);
-  const libraryImports = cg.zigvmLibraryImports ?? [];
-  const libraryMetadata = libraryImports.map(item =>
-    `/* ImportId=${item.id}; ModuleId=${item.moduleId}; ExportId=${item.exportId}; signature=${item.signatureIndex}; interface=${item.interfaceDigest}; ${item.requirement} */`).join('\n');
   const cases = exports.map(item => {
     const mismatch = item.params.map((type, i) => `!zvm_porf_value_is(args + ${i}u, ${type === 'i32' ? 'ZVM_VALUE_V2_I32' : 'ZVM_VALUE_V2_F64'})`).join(' || ') || '0';
     const callArgs = [ 'exec', 'provider', '&status' ];
@@ -28,8 +25,7 @@ export const appendEnjinModule = (c, cg) => {
   return `${c}
 
 /* PORF-MOD-005: host-owned descriptor query and numeric v2 dispatch. */
-/* PORF-MOD-008: metadata is resolved by zigvm from DispatchSnapshot. */
-${libraryMetadata}
+/* PORF-MOD-008: authenticated library metadata is in the descriptor tail. */
 static const unsigned char zvm_porf_descriptor_v2[] = { ${bytes(blob)} };
 static const unsigned char zvm_porf_provider_id_v2[16] = { ${idBytes(blob, 104, 16)} };
 static const unsigned char zvm_porf_provider_digest_v2[32] = { ${idBytes(blob, 120, 32)} };

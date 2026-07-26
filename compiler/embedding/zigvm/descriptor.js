@@ -19,6 +19,10 @@ const u32Pref = (prefs, key, fallback = 0) => {
   return Number(value);
 };
 const valueTag = type => type === 'i32' ? 2 : (type === 'f64' || type === 'number') ? 3 : type === 'void' ? 0 : null;
+// Authenticated descriptor tail: 64-byte records follow signatures.  The
+// frozen 344-byte header remains unchanged; this flag makes the optional
+// extension unambiguous to the bounds-first artifact decoder.
+const libraryImportExtension = 1;
 
 const exportIds = prefs => {
   if (prefs.enjinExportIds == null || prefs.enjinExportIds === '') return new Map();
@@ -71,7 +75,8 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   if (ids.size !== exports.length) profileFailure('ZVM-DESCRIPTOR-005', 'registry contains an unknown export');
   exports.sort((a, b) => a.id - b.id);
   const imports = numericPairs(prefs, 'enjinImportIds', 'ImportId:signatureIndex');
-  for (const item of libraryImports(prefs)) {
+  const libraryImportRecords = libraryImports(prefs);
+  for (const item of libraryImportRecords) {
     if (imports.some(existing => existing.id === item.id))
       profileFailure('ZVM-DESCRIPTOR-007', `ScriptLibrary ImportId ${item.id} duplicates --enjin-import-ids`);
     imports.push({ id: item.id, value: item.signatureIndex });
@@ -87,8 +92,9 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   const tablesEnd = capabilityOffset ? capabilityOffset + capabilities.length * 8 : importOffset ? importOffset + imports.length * 8 : header + exports.length * 8;
   const signatureOffset = exports.length ? (tablesEnd + 3) & ~3 : 0;
   if (imports.some(x => x.value >= exports.length)) profileFailure('ZVM-DESCRIPTOR-007', 'import signature index is unknown');
-  const blob = new Uint8Array(signatureOffset ? signatureOffset + signaturesLength : tablesEnd);
-  u32(blob, 0, header); u32(blob, 4, 2); u32(blob, 8, 3);
+  const libraryOffset = libraryImportRecords.length ? (signatureOffset + signaturesLength + 3) & ~3 : 0;
+  const blob = new Uint8Array(libraryOffset ? libraryOffset + libraryImportRecords.length * 64 : (signatureOffset ? signatureOffset + signaturesLength : tablesEnd));
+  u32(blob, 0, blob.length); u32(blob, 4, 2); u32(blob, 8, 3);
   blob.set(hex(prefs.enjinModuleId, 16, '--enjin-module-id'), 24);
   // VersionId and ArtifactContentId are derived after the completed native
   // image exists. Query always exposes a zero-ID template for host rewrite.
@@ -101,7 +107,7 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   const scratchMax = u32Pref(prefs, 'enjinScratchMax');
   const scratchAlignment = u32Pref(prefs, 'enjinScratchAlignment', 8);
   if (scratchMin > scratchMax || scratchAlignment === 0 || (scratchAlignment & (scratchAlignment - 1)) !== 0) profileFailure('ZVM-DESCRIPTOR-006', 'invalid scratch limits or alignment');
-  u32(blob, 224, scratchMin); u32(blob, 228, scratchMax); u32(blob, 232, scratchAlignment); u32(blob, 236, u32Pref(prefs, 'enjinDescriptorFlags'));
+  u32(blob, 224, scratchMin); u32(blob, 228, scratchMax); u32(blob, 232, scratchAlignment); u32(blob, 236, u32Pref(prefs, 'enjinDescriptorFlags') | (libraryImportRecords.length ? libraryImportExtension : 0));
   blob.set(hex(prefs.enjinPublicInterfaceDigest, 32, '--enjin-public-interface-digest'), 240);
   blob.set(hex(prefs.enjinSourceMapDigest, 32, '--enjin-source-map-digest'), 272);
   let signatureAt = signatureOffset;
@@ -113,10 +119,20 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
     signatureAt += 12 + item.params.length * 4;
   });
   imports.forEach((item, index) => { u32(blob, importOffset + index * 8, item.id); u32(blob, importOffset + index * 8 + 4, item.value); });
+  // PORF-MOD-008: full ScriptLibrary contracts are authenticated descriptor
+  // data, not generated-C comments.  The normal import table above owns the
+  // signature index; this tail maps its ImportId to target and policy.
+  libraryImportRecords.forEach((item, index) => {
+    const at = libraryOffset + index * 64;
+    u32(blob, at, item.id); u32(blob, at + 4, item.exportId);
+    blob.set(hex(item.moduleId, 16, 'ScriptLibrary ModuleId'), at + 8);
+    blob.set(hex(item.interfaceDigest, 32, 'ScriptLibrary interface digest'), at + 24);
+    u32(blob, at + 56, item.requirement === 'optional' ? 1 : 0);
+  });
   capabilities.forEach((item, index) => { u32(blob, capabilityOffset + index * 8, item.id); u32(blob, capabilityOffset + index * 8 + 4, item.value); });
   const hostImports = zigvm?.hostImports ?? [];
   for (const host of hostImports) {
     if (!capabilities.some(x => x.value === host.id)) profileFailure('ZVM-DESCRIPTOR-008', `HostCall '${host.name}' requires explicit CapabilityId:HostFunctionId metadata`);
   }
-  return { blob, exports, imports, capabilities };
+  return { blob, exports, imports, capabilities, libraryImports: libraryImportRecords };
 };
