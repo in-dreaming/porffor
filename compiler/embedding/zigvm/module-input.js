@@ -1,4 +1,5 @@
 // PORF-MOD-007: closed, content-authenticated canonical build input bridge.
+import fs from 'node:fs';
 const HEX = bytes => new RegExp(`^[0-9a-f]{${bytes * 2}}$`, 'i');
 // The in-tree adapter implements one BLAKE3 chunk. Keep this exactly aligned
 // with Zig's `max_content_bytes` until it grows a tree/streaming implementation.
@@ -6,13 +7,17 @@ export const MAX_CONTENT = 1024;
 export const MAX_REGISTRY = 4096;
 const REQUIRED = new Set(['schema_version','module_id','canonical_manifest_digest','state_schema_digest','source_graph_digest','profile','target','cpu','options_digest','artifact_version','abi_version','bundle_utf8','bundle_digest','source_map_utf8','source_map_digest','provider','node_fingerprint','typescript_fingerprint','c_fingerprint','zig_fingerprint','host_api_digest','toolchain_digest','porffor_gitlink','backend_schema','modification_revision','public_interface_digest','descriptor','sources','export_registry','import_registry','field_ids','dependencies','codegen_options']);
 export class BuildDiagnostic extends Error {
-  constructor(code, detail) { super(`${code}: ${detail}`); this.name = 'BuildDiagnostic'; this.code = code; this.phase = 'build_input'; this.detail = detail; }
+  constructor(code, detail, context = {}) { super(`${code}: ${detail}`); this.name = 'BuildDiagnostic'; this.code = code; this.phase = 'build_input'; this.module_id = context.module_id ?? null; this.version_id = context.version_id ?? null; this.transaction_id = context.transaction_id ?? null; this.detail = detail; }
+  renderHuman() { return `${this.code} phase=${this.phase} module_id=${this.module_id ?? '-'} version_id=${this.version_id ?? '-'} transaction_id=${this.transaction_id ?? '-'}: ${this.detail}`; }
 }
 const fail = (code, detail) => { throw new BuildDiagnostic(code, detail); };
-const provenance = () => ({
-  porffor_gitlink: globalThis.ZVM_BUILD_PORFFOR_GITLINK ?? process?.env?.ZVM_BUILD_PORFFOR_GITLINK,
-  modification_revision: globalThis.ZVM_BUILD_MODIFICATION_REVISION ?? process?.env?.ZVM_BUILD_MODIFICATION_REVISION,
-});
+const provenancePath = new URL('../../../../../src/compiler/script_module/build_provenance.json', import.meta.url);
+const provenance = () => {
+  try {
+    const value = JSON.parse(fs.readFileSync(provenancePath, 'utf8'));
+    return { porffor_gitlink: value.porffor_gitlink, modification_revision: value.modification_revision };
+  } catch { fail('ZVM-BUILD-011', 'parent-owned build provenance is missing or malformed'); }
+};
 const hex = (v, n, name) => { if (typeof v !== 'string' || !HEX(n).test(v) || /^0+$/.test(v)) fail('ZVM-BUILD-003', `${name} must be a nonzero ${n * 2}-digit digest`); return v.toLowerCase(); };
 const u32 = (v, name) => { if (!Number.isInteger(v) || v <= 0 || v > 0xffffffff) fail('ZVM-BUILD-004', `${name} must be a nonzero u32`); return v; };
 const u32zero = (v, name) => { if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) fail('ZVM-BUILD-004', `${name} must be a u32`); return v; };
