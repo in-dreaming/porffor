@@ -1,4 +1,5 @@
 import { profileFailure } from './diagnostics.js';
+import { libraryImports } from './library.js';
 
 const hex = (value, bytes, label) => {
   if (typeof value !== 'string' || !new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(value)) profileFailure('ZVM-DESCRIPTOR-001', `${label} must be ${bytes * 2} hexadecimal digits`);
@@ -70,6 +71,12 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   if (ids.size !== exports.length) profileFailure('ZVM-DESCRIPTOR-005', 'registry contains an unknown export');
   exports.sort((a, b) => a.id - b.id);
   const imports = numericPairs(prefs, 'enjinImportIds', 'ImportId:signatureIndex');
+  for (const item of libraryImports(prefs)) {
+    if (imports.some(existing => existing.id === item.id))
+      profileFailure('ZVM-DESCRIPTOR-007', `ScriptLibrary ImportId ${item.id} duplicates --enjin-import-ids`);
+    imports.push({ id: item.id, value: item.signatureIndex });
+  }
+  imports.sort((a, b) => a.id - b.id);
   const capabilities = numericPairs(prefs, 'enjinCapabilityIds', 'CapabilityId:HostFunctionId');
   if (capabilities.some(x => x.value === 0)) profileFailure('ZVM-DESCRIPTOR-007', 'HostFunctionId must be nonzero');
   const header = 344, exportOffset = exports.length ? header : 0;

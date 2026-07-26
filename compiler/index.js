@@ -6,6 +6,7 @@ import { isEmbeddedV2, validateProfile } from './embedding/zigvm/abi.js';
 import { lowerExplicitExec } from './embedding/zigvm/lowering.js';
 import { checkGameplayProfile } from './embedding/zigvm/profile.js';
 import { appendEnjinModule } from './embedding/zigvm/backend.js';
+import { lowerLibraryImports } from './embedding/zigvm/library.js';
 import './prefs.js';
 
 const logFuncs = (funcs, globals) => {
@@ -148,6 +149,9 @@ export default (code, module = Prefs.module, run = false) => {
   const cg = codegen(program);
   // PORF-MOD-002: the isolated pass marks the explicit exec call graph.
   if (embeddedV2) lowerExplicitExec(cg);
+  // PORF-MOD-008: only the product adapter accepts explicit ScriptLibrary
+  // manifest imports; normal modules and legacy --zigvm retain their paths.
+  if (Prefs.enjinModule) lowerLibraryImports(cg, Prefs);
   if (globalThis.compileCallback) globalThis.compileCallback(cg);
   cg.times = [ t0, t1, performance.now() ];
 
