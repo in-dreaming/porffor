@@ -88,6 +88,97 @@ try {
     'v2 must reject retained ordinary-runtime helpers before generating C'
   );
 
+  const enjin = join(temp, 'enjin-module.c');
+  const enjinArgs = [ '--enjin-module', '--no-gc', '--module', '-t', '--enjin-module-id=01010101010101010101010101010101', '--enjin-provider-id=02020202020202020202020202020202', '--enjin-provider-abi-digest=0303030303030303030303030303030303030303030303030303030303030303', '--enjin-public-interface-digest=0606060606060606060606060606060606060606060606060606060606060606', '--enjin-source-map-digest=0707070707070707070707070707070707070707070707070707070707070707', '--enjin-scratch-min=8', '--enjin-scratch-max=64', '--enjin-scratch-alignment=8', '--enjin-export-ids=add:42', '--enjin-import-ids=9:0,3:0', '--enjin-capability-ids=7:42,2:9' ];
+  const enjinC = compile([ ...enjinArgs, '../../test/porffor/v2_fixture.ts' ], enjin);
+  compileC(enjin);
+  assert.match(enjinC, /zvm_porf_module_query_v2\(void\* out, u32 capacity, u32\* required\)/);
+  assert.match(enjinC, /case 42u:/);
+  assert.match(enjinC, /0x03u, 0x00u, 0x00u, 0x00u/);
+  assert.match(enjinC, /zvm_porf_call_v2\(zvm_porf_exec_ctx_v2\* exec, u32 export_id/);
+  const enjinDll = join(temp, process.platform === 'win32' ? 'enjin-module.dll' : 'enjin-module.so');
+  execFileSync('zig', [ 'cc', '-shared', '-Wl,--export-all-symbols', `-I${includeDir}`, enjin, '-o', enjinDll ], { cwd: root, stdio: 'pipe' });
+  const dllHarness = join(temp, 'enjin_dll_harness.c');
+  writeFileSync(dllHarness, `#include <string.h>
+#include <stdint.h>
+#include "zigvm/porffor_embedded_v2.h"
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+static unsigned char linear[1024];
+static void *base(zvm_porf_exec_ctx_v2 *e) { (void)e; return linear; }
+static bool reserve(zvm_porf_exec_ctx_v2 *e, uint32_t n) { (void)e; (void)n; return true; }
+static bool commit(zvm_porf_exec_ctx_v2 *e, uint32_t n) { (void)e; (void)n; return true; }
+static void *scratch(zvm_porf_exec_ctx_v2 *e, uint32_t n, uint32_t a) { (void)e; (void)n; (void)a; return 0; }
+static void reset(zvm_porf_exec_ctx_v2 *e) { (void)e; }
+static zvm_status_v2 host(zvm_porf_exec_ctx_v2 *e, uint32_t i, const zvm_value_v2 *a, uint32_t n, zvm_value_v2 *r) { (void)e; (void)i; (void)a; (void)n; (void)r; return ZVM_STATUS_V2_OK; }
+static zvm_status_v2 poll(zvm_porf_exec_ctx_v2 *e, uint32_t f) { (void)e; (void)f; return ZVM_STATUS_V2_OK; }
+static zvm_status_v2 trap(zvm_porf_exec_ctx_v2 *e, uint32_t c) { (void)e; (void)c; return ZVM_STATUS_V2_TRAP; }
+static uint64_t budget(zvm_porf_exec_ctx_v2 *e) { (void)e; return 1; }
+static bool cancelled(zvm_porf_exec_ctx_v2 *e) { (void)e; return false; }
+int main(int argc, char **argv) {
+#ifdef _WIN32
+  HMODULE image = LoadLibraryA(argv[1]); if (!image) return 1;
+  zvm_status_v2 (*query)(void *, uint32_t, uint32_t *) = (void *)GetProcAddress(image, "zvm_porf_module_query_v2");
+  zvm_status_v2 (*call)(zvm_porf_exec_ctx_v2 *, uint32_t, uint32_t, const zvm_value_v2 *, uint32_t, zvm_value_v2 *) = (void *)GetProcAddress(image, "zvm_porf_call_v2");
+#else
+  void *image = dlopen(argv[1], RTLD_NOW); if (!image) return 1;
+  zvm_status_v2 (*query)(void *, uint32_t, uint32_t *) = dlsym(image, "zvm_porf_module_query_v2");
+  zvm_status_v2 (*call)(zvm_porf_exec_ctx_v2 *, uint32_t, uint32_t, const zvm_value_v2 *, uint32_t, zvm_value_v2 *) = dlsym(image, "zvm_porf_call_v2");
+#endif
+  if (!query || !call) return 2; uint32_t required = 0; if (query(0, 0, &required) != 0 || required < ZVM_DESCRIPTOR_V2_KNOWN_SIZE) return 3;
+  unsigned char descriptor[512]; if (required > sizeof descriptor || query(descriptor, sizeof descriptor, &required) != 0 || descriptor[40] != 0 || descriptor[72] != 0 || descriptor[224] != 8) return 4;
+  zvm_porf_provider_api_v1 api = { sizeof api, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, scratch, reset, host, poll, trap, budget, cancelled };
+  zvm_porf_exec_boundary_v2 boundary = { ZVM_PORF_EXEC_BOUNDARY_V2_MAGIC, sizeof boundary, &api, {{2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2}}, {{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3}}, 0, 17, 1 };
+  zvm_value_v2 args[2] = { { ZVM_VALUE_V2_F64, 0, 0x3ff0000000000000ULL }, { ZVM_VALUE_V2_F64, 0, 0x4000000000000000ULL } }, result = {0};
+  zvm_status_v2 status = call((zvm_porf_exec_ctx_v2 *)&boundary, 42, 17, args, 2, &result); if (status != 0) return 10 + status; if (result.tag != ZVM_VALUE_V2_F64 || result.payload != 0x4008000000000000ULL) return 5;
+  boundary.logical_instance_token = 18; if (call((zvm_porf_exec_ctx_v2 *)&boundary, 42, 17, args, 2, &result) != ZVM_STATUS_V2_PROVIDER_MISMATCH) return 6;
+  return 0;
+}`);
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, dllHarness, '-o', executablePath('enjin_dll_harness') ], { cwd: root, stdio: 'pipe' });
+  execFileSync(executablePath('enjin_dll_harness'), [ enjinDll ], { cwd: root, stdio: 'pipe' });
+  // This exercises the exact DLL through the Zig loader boundary: it resolves
+  // query/call, derives and verifies an envelope over this image, normalizes
+  // the zero-ID query template, then invokes numeric export 42 via Module.
+  execFileSync('zig', [ 'run', '../../src/runtime/porffor_embedded_v2_dll_runner.zig', '--', enjinDll ], { cwd: root, stdio: 'pipe' });
+  const registryBase = enjinArgs.filter(x => !x.startsWith('--enjin-import-ids=') && !x.startsWith('--enjin-capability-ids='));
+  for (const args of [
+    [ '--enjin-import-ids=2:0,2:0' ],
+    [ '--enjin-import-ids=2:9' ],
+    [ '--enjin-capability-ids=2:0' ],
+    [ '--enjin-capability-ids=2:9,2:10' ],
+  ]) assert.throws(() => compile([ ...registryBase, ...args, '../../test/porffor/v2_fixture.ts' ], join(temp, 'bad-registry.c')), /ZVM-DESCRIPTOR-007/);
+  const badProfile = join(temp, 'bad-profile.ts');
+  writeFileSync(badProfile, 'let state: i32 = 1; export function add(a: i32): i32 { return a; }');
+  assert.throws(
+    () => compile([ ...enjinArgs, badProfile ], join(temp, 'bad-profile.c')),
+    /ZVM-PROFILE-001/,
+    'gameplay profile rejects mutable globals before C rendering'
+  );
+  const canonicalHostCall = join(temp, 'canonical-host-call.ts');
+  writeFileSync(canonicalHostCall, 'const { host } = Porffor.dlopen("__zigvm_host__", { host: { id: 42, parameters: [], result: "i32" } }); export function add(a: i32, b: i32): i32 { return a + b; }');
+  compile([ ...enjinArgs, canonicalHostCall ], join(temp, 'canonical-host-call.c'));
+  for (const [code, source] of [
+    [ 'ZVM-PROFILE-001', 'export let state: i32 = 1;' ],
+    [ 'ZVM-PROFILE-004', 'const run = eval; run("1");' ],
+    [ 'ZVM-PROFILE-004', '(0, eval)("1");' ],
+    [ 'ZVM-PROFILE-004', 'globalThis.eval("1");' ],
+    [ 'ZVM-PROFILE-004', 'const g = globalThis; g.eval("1");' ],
+    [ 'ZVM-PROFILE-005', 'Porffor["dlopen"]("not-host", 0);' ],
+    [ 'ZVM-PROFILE-005', 'const p = Porffor; p.dlopen("not-host", 0);' ],
+    [ 'ZVM-PROFILE-005', 'Porffor["dlo" + "pen"]("not-host", 0);' ],
+    [ 'ZVM-PROFILE-005', 'Porffor.dlopen("not-host", 0);' ],
+    [ 'ZVM-PROFILE-002', 'import("other");' ],
+    [ 'ZVM-PROFILE-003', 'async function f() { await 1; }' ],
+    [ 'ZVM-PROFILE-003', 'try { 1; } catch (e) {}' ],
+  ]) {
+    const sourcePath = join(temp, `profile-${code}.ts`);
+    writeFileSync(sourcePath, source);
+    assert.throws(() => compile([ ...enjinArgs, sourcePath ], join(temp, `profile-${code}.c`)), new RegExp(code));
+  }
+
   // Include the generated TU so the test can call its internal function with
   // two independent explicit execution contexts.
   const harness = join(temp, 'interleave.c');

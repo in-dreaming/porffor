@@ -253,7 +253,9 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
   const funcOf = ref => typeof ref === 'number' ? funcs[ref] : funcByName.get(ref);
   const fnSym = f => `p${f.index}_${sanitize(String(f.name))}`;
   const zigvmEnabled = !!prefs.zigvm;
-  const embeddedV2 = !!prefs.zigvmEmbeddedV2;
+  // PORF-MOD-001: --enjin-module is a distinct product adapter, but it
+  // reuses the isolated explicit-exec lowering and renderer accessors.
+  const embeddedV2 = !!(prefs.zigvmEmbeddedV2 || prefs.enjinModule);
   const nativeFetchFuncSym = name => {
     const f = funcByName.get(name);
     if (!f) throw new Error(`missing native fetch function ${name}`);

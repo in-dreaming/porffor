@@ -2505,7 +2505,7 @@ const objectProperty = (obj, name) => obj?.properties?.find(x => objectPropertyN
 
 // PORF-MOD-004: retain stable host IDs in IR without changing ordinary calls.
 const registerZigvmHostImports = (pattern, init) => {
-  if (!Prefs.zigvm && !Prefs.zigvmEmbeddedV2) throw new Error('Porffor.dlopen is not yet supported in the native IR backend');
+  if (!Prefs.zigvm && !Prefs.zigvmEmbeddedV2 && !Prefs.enjinModule) throw new Error('Porffor.dlopen is not yet supported in the native IR backend');
   if (init.arguments[0]?.value !== '__zigvm_host__')
     throw new Error(`--zigvm only supports Porffor.dlopen("__zigvm_host__", ...)`);
   if (pattern.type !== 'ObjectPattern' || init.arguments[1]?.type !== 'ObjectExpression')
@@ -2528,7 +2528,7 @@ const registerZigvmHostImports = (pattern, init) => {
     const id = objectProperty(spec, 'id')?.value;
     for (let i = 0; i < parameters.length; i++) zigvmAbiIrType(parameters[i], `${localName} parameter ${i}`);
     zigvmAbiIrType(result, `${localName} result`, true);
-    if (Prefs.zigvmEmbeddedV2 && (!Number.isInteger(id) || id <= 0 || id > 0xffffffff))
+    if ((Prefs.zigvmEmbeddedV2 || Prefs.enjinModule) && (!Number.isInteger(id) || id <= 0 || id > 0xffffffff))
       throw new Error(`embedded v2 host import ${localName} requires a stable positive numeric id`);
     zigvmHostImports.set(localName, { name: sourceName, parameters, result, id });
   }
@@ -5181,6 +5181,6 @@ export default (program, opts = {}) => {
     entry: entryName,
     prefs: rawHead.length ? { ...Prefs, rawHead: [ Prefs.rawHead, ...rawHead ].filter(Boolean).join('\n') } : Prefs,
     usedTypes,
-    zigvm: (Prefs.zigvm || Prefs.zigvmEmbeddedV2) ? { hostImports: [ ...zigvmHostImports.values() ] } : null
+    zigvm: (Prefs.zigvm || Prefs.zigvmEmbeddedV2 || Prefs.enjinModule) ? { hostImports: [ ...zigvmHostImports.values() ] } : null
   };
 };

@@ -2,7 +2,7 @@
 // PORF-MOD-004: status stays caller-owned and is never represented by TLS,
 // longjmp, or a module-global runtime table.
 
-export const isEmbeddedV2 = prefs => !!prefs.zigvmEmbeddedV2;
+export const isEmbeddedV2 = prefs => !!(prefs.zigvmEmbeddedV2 || prefs.enjinModule);
 
 export const validateProfile = prefs => {
   if (!isEmbeddedV2(prefs)) return;

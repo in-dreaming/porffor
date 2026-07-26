@@ -4,6 +4,8 @@ import codegen from './codegen.js';
 import render from './render.js';
 import { isEmbeddedV2, validateProfile } from './embedding/zigvm/abi.js';
 import { lowerExplicitExec } from './embedding/zigvm/lowering.js';
+import { checkGameplayProfile } from './embedding/zigvm/profile.js';
+import { appendEnjinModule } from './embedding/zigvm/backend.js';
 import './prefs.js';
 
 const logFuncs = (funcs, globals) => {
@@ -124,6 +126,8 @@ export default (code, module = Prefs.module, run = false) => {
   if (logProgress) progressStart('parsing...');
   const t0 = performance.now();
   const program = parse(code);
+  // PORF-MOD-006: reject gameplay-profile violations before C rendering.
+  if (Prefs.enjinModule) checkGameplayProfile(program);
   if (Prefs.zigvm || embeddedV2) {
     const unsupported = zigvmUnsupportedConstructs(program, { allowExplicitTrap: embeddedV2, embeddedV2 });
     if (unsupported.length > 0) {
@@ -152,7 +156,8 @@ export default (code, module = Prefs.module, run = false) => {
   if (logProgress) progressStart('rendering C...');
   const t4 = performance.now();
   const cOut = render(cg);
-  const c = typeof cOut === 'string' ? cOut : cOut.c;
+  const rendered = typeof cOut === 'string' ? cOut : cOut.c;
+  const c = Prefs.enjinModule ? appendEnjinModule(rendered, cg) : rendered;
   if (Prefs.zigvmManifest) {
     if (!Prefs.zigvm) throw new Error('--zigvm-manifest requires --zigvm');
     if (!cOut?.zigvmManifest) throw new Error('zigvm manifest was not generated');
