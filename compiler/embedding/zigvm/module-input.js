@@ -23,6 +23,9 @@ const u32 = (v, name) => { if (!Number.isInteger(v) || v <= 0 || v > 0xffffffff)
 const u32zero = (v, name) => { if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) fail('ZVM-BUILD-004', `${name} must be a u32`); return v; };
 const text = (v, name, empty = false) => { if (typeof v !== 'string' || (!empty && !v) || Buffer.byteLength(v) > MAX_CONTENT || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(v)) fail('ZVM-BUILD-002', `${name} must be UTF-8 without unpaired surrogates within limits`); return v; };
 const path = v => { text(v, 'source logical_path'); if (/^[A-Za-z]:|^\\\\|^\//.test(v) || v.includes('\\') || v.split('/').some(x => !x || x === '.' || x === '..')) fail('ZVM-BUILD-005', 'source logical_path must be a relative logical path'); return v; };
+// The canonical path order is unsigned UTF-8 byte order, matching Zig's
+// std.mem.order rather than JavaScript's UTF-16 code-unit order.
+const utf8Compare = (a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
 const rot = (x, n) => (x >>> n) | (x << (32 - n));
 const IV = [0x6A09E667,0xBB67AE85,0x3C6EF372,0xA54FF53A,0x510E527F,0x9B05688C,0x1F83D9AB,0x5BE0CD19];
 const PERM = [2,6,3,10,7,0,4,13,1,11,12,5,9,14,15,8];
@@ -44,24 +47,62 @@ const options = raw => {
   for (const name of ['module','typescript','gc','optimize']) if (!(name in r)) fail('ZVM-BUILD-002', `codegen_options.${name} is required`);
   return r;
 };
+const base64 = byte => byte >= 65 && byte <= 90 ? byte - 65 : byte >= 97 && byte <= 122 ? byte - 97 + 26 : byte >= 48 && byte <= 57 ? byte - 48 + 52 : byte === 43 ? 62 : byte === 47 ? 63 : -1;
+const decodeVlq = (mappings, state) => {
+  let value = 0, shift = 0;
+  for (;;) {
+    if (state.offset >= mappings.length) fail('ZVM-BUILD-009', 'source map has an unterminated VLQ');
+    const digit = base64(mappings.charCodeAt(state.offset++));
+    if (digit < 0 || shift > 50) fail('ZVM-BUILD-009', 'source map has an invalid VLQ');
+    value += (digit & 31) * 2 ** shift;
+    if (!Number.isSafeInteger(value)) fail('ZVM-BUILD-009', 'source map VLQ overflows');
+    if (!(digit & 32)) break;
+    shift += 5;
+  }
+  const signed = Math.trunc(value / 2);
+  return value % 2 ? -signed - 1 : signed;
+};
+const validateMappings = (mappings, sourceCount, nameCount) => {
+  const state = { offset: 0 }, previous = { source: 0, line: 0, column: 0, name: 0, generated: 0 };
+  let segment = [];
+  const finish = () => {
+    if (!segment.length) return;
+    if (![1, 4, 5].includes(segment.length)) fail('ZVM-BUILD-009', 'source map has an invalid segment arity');
+    previous.generated += segment[0];
+    if (previous.generated < 0) fail('ZVM-BUILD-009', 'source map has a negative generated column');
+    if (segment.length > 1) {
+      previous.source += segment[1]; previous.line += segment[2]; previous.column += segment[3];
+      if (previous.source < 0 || previous.source >= sourceCount || previous.line < 0 || previous.column < 0) fail('ZVM-BUILD-009', 'source map index is out of range');
+      if (segment.length === 5) { previous.name += segment[4]; if (previous.name < 0 || previous.name >= nameCount) fail('ZVM-BUILD-009', 'source map name index is out of range'); }
+    }
+    segment = [];
+  };
+  while (state.offset < mappings.length) {
+    const char = mappings[state.offset];
+    if (char === ',' || char === ';') { if (!segment.length && char === ',') fail('ZVM-BUILD-009', 'source map has an empty segment'); finish(); if (char === ';') previous.generated = 0; state.offset++; continue; }
+    if (segment.length === 5) fail('ZVM-BUILD-009', 'source map has an invalid segment arity');
+    segment.push(decodeVlq(mappings, state));
+  }
+  finish();
+};
 export const parseCanonicalModuleInput = raw => {
   if (raw?.cancelled || raw?.signal?.aborted) fail('ZVM-BUILD-012', 'canonical build cancelled');
   let x; try { x=typeof raw==='string'?JSON.parse(raw):raw; } catch { fail('ZVM-BUILD-001','invalid JSON'); }
   closed(x, REQUIRED, 'manifest'); for(const k of REQUIRED) if(!(k in x)) fail('ZVM-BUILD-002', `manifest.${k} is required`); if(x.schema_version!==1) fail('ZVM-BUILD-001','unsupported schema_version');
   if (!Array.isArray(x.sources) || x.sources.length > MAX_REGISTRY) fail('ZVM-BUILD-002', 'sources must be a bounded array');
-  const sources = x.sources.map(s => { closed(s,new Set(['logical_path','utf8','digest']),'source'); const logical_path=path(s.logical_path), utf8=text(s.utf8,'source utf8'), digest=hex(s.digest,32,'source.digest'); if(canonicalBlake3(utf8)!==digest) fail('ZVM-BUILD-008','source digest mismatch'); return {logical_path,utf8,digest}; }).sort((a,b)=>a.logical_path < b.logical_path ? -1 : a.logical_path > b.logical_path ? 1 : 0);
+  const sources = x.sources.map(s => { closed(s,new Set(['logical_path','utf8','digest']),'source'); const logical_path=path(s.logical_path), utf8=text(s.utf8,'source utf8'), digest=hex(s.digest,32,'source.digest'); if(canonicalBlake3(utf8)!==digest) fail('ZVM-BUILD-008','source digest mismatch'); return {logical_path,utf8,digest}; }).sort((a,b)=>utf8Compare(a.logical_path, b.logical_path));
   if(!sources.length || sources.some((s,i)=>i&&s.logical_path===sources[i-1].logical_path)) fail('ZVM-BUILD-006','invalid source registry');
   closed(x.provider,new Set(['id','abi_digest','required_features']),'provider');
   if (!Array.isArray(x.dependencies) || x.dependencies.length > MAX_REGISTRY) fail('ZVM-BUILD-002', 'dependencies must be a bounded array');
   const deps=x.dependencies.map(d=>{closed(d,new Set(['module_id','public_interface_digest']),'dependency');return {module_id:hex(d.module_id,16,'dependency.module_id'),public_interface_digest:hex(d.public_interface_digest,32,'dependency.public_interface_digest')};}).sort((a,b)=>a.module_id < b.module_id ? -1 : a.module_id > b.module_id ? 1 : 0);
   if(deps.some((d,i)=>i&&d.module_id===deps[i-1].module_id)) fail('ZVM-BUILD-006','duplicate dependency ModuleId');
-  const bundle_utf8=text(x.bundle_utf8,'bundle_utf8'), source_map_utf8=text(x.source_map_utf8,'source_map_utf8'); try { const m=JSON.parse(source_map_utf8); if(!m || typeof m!=='object' || m.version !== 3 || !Array.isArray(m.sources) || !m.sources.length || m.sources.length > MAX_REGISTRY || !Array.isArray(m.names) || m.names.length > MAX_REGISTRY || typeof m.mappings !== 'string' || !/^[A-Za-z0-9+/;,]*$/.test(m.mappings) || m.sources.some(s=>{ try { path(s); return false; } catch { return true; } })) fail('ZVM-BUILD-009','source map is malformed'); } catch(e) { if(e.code) throw e; fail('ZVM-BUILD-009','source map is malformed'); }
+  const bundle_utf8=text(x.bundle_utf8,'bundle_utf8'), source_map_utf8=text(x.source_map_utf8,'source_map_utf8'); try { const m=JSON.parse(source_map_utf8); if(!m || typeof m!=='object' || m.version !== 3 || !Array.isArray(m.sources) || !m.sources.length || m.sources.length > MAX_REGISTRY || !Array.isArray(m.names) || m.names.length > MAX_REGISTRY || typeof m.mappings !== 'string' || !/^[A-Za-z0-9+/;,]*$/.test(m.mappings) || m.sources.some(s=>{ try { path(s); return false; } catch { return true; } }) || m.names.some(n=>{ try { text(n, 'source-map name'); return false; } catch { return true; } })) fail('ZVM-BUILD-009','source map is malformed'); validateMappings(m.mappings, m.sources.length, m.names.length); } catch(e) { if(e.code) throw e; fail('ZVM-BUILD-009','source map is malformed'); }
   const codegen_options = options(x.codegen_options);
   if (codegen_options.gc) fail('ZVM-BUILD-002', 'codegen_options.gc=true is unsupported by embedded-v2');
   const registry = (xs, name, value) => {
     if (!Array.isArray(xs) || xs.length > MAX_REGISTRY) fail('ZVM-BUILD-002', `${name} must be a bounded array`);
     const seenNames = new Set(), seenIds = new Set();
-    const out = xs.map(item => { closed(item, new Set(['name','id', ...(value ? [value] : [])]), name); const entry = { name:text(item.name, `${name}.name`), id:u32(item.id, `${name}.id`) }; if (value) entry[value] = u32(item[value], `${name}.${value}`); if (seenNames.has(entry.name) || seenIds.has(entry.id)) fail('ZVM-BUILD-006', `duplicate ${name}`); seenNames.add(entry.name); seenIds.add(entry.id); return entry; });
+    const out = xs.map(item => { closed(item, new Set(['name','id', ...(value ? [value] : [])]), name); const entry = { name:text(item.name, `${name}.name`), id:u32(item.id, `${name}.id`) }; if (value) entry[value] = value === 'signature_index' ? u32zero(item[value], `${name}.${value}`) : u32(item[value], `${name}.${value}`); if (seenNames.has(entry.name) || seenIds.has(entry.id)) fail('ZVM-BUILD-006', `duplicate ${name}`); seenNames.add(entry.name); seenIds.add(entry.id); return entry; });
     return out.sort((a,b)=>a.id-b.id);
   };
   const export_registry = registry(x.export_registry, 'export_registry');
