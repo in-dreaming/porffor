@@ -37,14 +37,17 @@ export const createAdapter = ({ enabled, staticEnd, globals, hostImports }) => {
     setArrayLength: (array, length) => `*(i32*)(${memory} + (u32)${array}.val) = ${length}`,
     prepare: defaultValue => `if (!zvm_porf_prepare(exec, provider, status)) return ${defaultValue};`,
     statusGuard: defaultValue => `if (*status != ZVM_STATUS_V2_OK) return ${defaultValue};`,
-    // The canonical sidecar's generated coordinate space is the input bundle,
-    // not this emitted C translation unit. A C `__LINE__` must therefore
-    // never be fed to the mapper: it can silently select an unrelated TS
-    // span. Until lowering supplies the bundle coordinate for a trap node,
-    // report the explicit out-of-range sentinel and preserve native fallback.
-    // Keep this immediately adjacent to raise_trap so a later trap cannot
-    // overwrite the location selected by the runtime exit path.
-    trap: (code, defaultValue) => `if (*status == ZVM_STATUS_V2_OK) { zvm_porf_report_generated_location(exec, 0xffffffffu, 0u); *status = zvm_porf_raise_trap(exec, provider, ${code}); } return ${defaultValue};`,
+    // The sidecar's generated space is the canonical input bundle, never the
+    // emitted C translation unit. Source-located user throws carry their
+    // zero-based bundle coordinate through IR; compiler-synthesized traps
+    // retain the explicit sentinel and therefore safely fall back to native.
+    // Keep the report adjacent to raise_trap so a later trap cannot overwrite
+    // the location consumed on this invocation's exit path.
+    trap: (code, defaultValue, location = null) => {
+      const line = location ? `${location.line}u` : '0xffffffffu';
+      const column = location ? `${location.column}u` : '0u';
+      return `if (*status == ZVM_STATUS_V2_OK) { zvm_porf_report_generated_location(exec, ${line}, ${column}); *status = zvm_porf_raise_trap(exec, provider, ${code}); } return ${defaultValue};`;
+    },
     finish: c => scanGeneratedC(rewriteGeneratedC(c))
   };
 };

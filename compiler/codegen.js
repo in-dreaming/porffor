@@ -3811,12 +3811,12 @@ const generateThrow = (scope, decl) => {
       const msg = message
         ? dataRef(`#msg:${message}`, [ ...i32Bytes(message.length), ...[...message].map(c => c.charCodeAt(0) & 0xff) ])
         : Const(T.u32, 0);
-      stmt(scope, ThrowNew(TYPES[constructor.toLowerCase()] ?? TYPES.error, msg));
+      stmt(scope, ThrowNew(TYPES[constructor.toLowerCase()] ?? TYPES.error, msg, decl._zigvmCanonicalLocation));
       return;
     }
   }
 
-  stmt(scope, Throw(generate(scope, decl.argument)));
+  stmt(scope, Throw(generate(scope, decl.argument), decl._zigvmCanonicalLocation));
 };
 
 const generateTry = (scope, decl) => {

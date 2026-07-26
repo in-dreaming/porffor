@@ -32,6 +32,35 @@ const uwebsockets = (typeof process?.version !== 'undefined' ? (await import('./
 const formatTime = ms => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s` : ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms.toFixed(0)}ms`;
 const formatSize = bytes => bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)}MB` : `${(bytes / 1000).toFixed(1)}KB`;
 
+// PORF-MOD-009: attach only canonical bundle coordinates that the embedded
+// trap lowering needs. The v3 sidecar maps this bundle coordinate to the
+// logical TS source; ordinary and legacy targets do not consume it.
+const attachCanonicalLocations = (program, code) => {
+  const starts = [0];
+  for (let index = 0; index < code.length; index++) if (code.charCodeAt(index) === 10) starts.push(index + 1);
+  const locationFor = offset => {
+    let low = 0, high = starts.length;
+    while (low + 1 < high) {
+      const mid = (low + high) >>> 1;
+      if (starts[mid] <= offset) low = mid;
+      else high = mid;
+    }
+    return { line: low, column: offset - starts[low] };
+  };
+  const visit = node => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'ThrowStatement' && Number.isSafeInteger(node.start) && node.start >= 0)
+      node._zigvmCanonicalLocation = locationFor(node.start);
+    for (const key of Object.keys(node)) {
+      if (key === 'parent' || key === '_zigvmCanonicalLocation') continue;
+      const value = node[key];
+      if (Array.isArray(value)) for (const item of value) visit(item);
+      else if (value && typeof value === 'object' && typeof value.type === 'string') visit(value);
+    }
+  };
+  visit(program);
+};
+
 const zigvmUnsupportedConstructs = (program, { allowExplicitTrap = false, embeddedV2 = false } = {}) => {
   const found = new Map();
   const add = (kind, detail) => {
@@ -130,6 +159,7 @@ export default (code, module = Prefs.module, run = false) => {
   if (logProgress) progressStart('parsing...');
   const t0 = performance.now();
   const program = parse(code);
+  if (embeddedV2) attachCanonicalLocations(program, code);
   // PORF-MOD-006: reject gameplay-profile violations before C rendering.
   if (Prefs.enjinModule) checkGameplayProfile(program);
   if (Prefs.zigvm || embeddedV2) {

@@ -88,7 +88,7 @@ try {
   assert.match(embeddedC, /zvm_porf_poll\(exec, provider/);
   assert.doesNotMatch(embeddedC, /\b(?:MEM|porf_mem|porf_heap_cur|zvm_porf_initialized)\b/);
   assert.match(trappedC, /zvm_porf_raise_trap\(exec, provider, ZVM_STATUS_V2_TRAP\)/);
-  assert.match(trappedC, /zvm_porf_report_generated_location\(exec, 0xffffffffu, 0u\);\s*\*status = zvm_porf_raise_trap/);
+  assert.match(trappedC, /zvm_porf_report_generated_location\(exec, 1u, 2u\);\s*\*status = zvm_porf_raise_trap/);
   assert.match(nestedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?p\d+_inner\(exec, provider, status,/);
   assert.match(hostedC, /zvm_porf_poll\(exec, provider, ZVM_PORF_SAFEPOINT_CALL\)[\s\S]*?zvm_porf_host_fail\(exec, provider, status\)/);
   assert.match(statusCommitC, /_zvm_status_value_0 = .*zvm_porf_host_fail[\s\S]*?if \(\*status != ZVM_STATUS_V2_OK\) return JV_UNDEFINED;[\s\S]*?zvm_porf_globals\(exec, provider\)->shared = _zvm_status_value_0;/);

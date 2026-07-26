@@ -371,8 +371,15 @@ export const CallDynamic = (fn, thisArg, args, newTarget = null, spreadArr = nul
 
 // exceptions
 export const Try = (stmts, catchParam, catchStmts) => [K.Try, T.none, FX.call, stmts, catchParam, catchStmts];
-export const Throw = jv => [K.Throw, T.none, FX.call | fxOf(jv), jv, 0, 0];
-export const ThrowNew = (errTypeId, msgId) => [K.ThrowNew, T.none, FX.call, errTypeId, msgId, 0];
+// The optional location is canonical-bundle, zero-based line/column data.
+// Keep it as a named property instead of extending the hot six-slot node
+// layout used by the renderer and lowering passes.
+const trapNode = (node, location) => {
+  if (location) node.zigvmTrapLocation = location;
+  return node;
+};
+export const Throw = (jv, location = null) => trapNode([K.Throw, T.none, FX.call | fxOf(jv), jv, 0, 0], location);
+export const ThrowNew = (errTypeId, msgId, location = null) => trapNode([K.ThrowNew, T.none, FX.call, errTypeId, msgId, 0], location);
 
 // coroutines
 export const Await = jv => [K.Await, T.jsval, FX.call | fxOf(jv), jv, 0, 0];

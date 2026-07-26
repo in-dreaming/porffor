@@ -881,12 +881,12 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
 
       case K.Throw:
         // PORF-MOD-004: embedded traps return the frozen provider status, never longjmp.
-        if (embedded) emit(`${ind()}${embedded.trap('ZVM_STATUS_V2_TRAP', embeddedReturnDefault)}\n`);
+        if (embedded) emit(`${ind()}${embedded.trap('ZVM_STATUS_V2_TRAP', embeddedReturnDefault, node.zigvmTrapLocation)}\n`);
         else emit(`${ind()}porf_throw(${rx(node[N_A], P_COMMA)});\n`);
         return;
 
       case K.ThrowNew:
-        if (embedded) emit(`${ind()}${embedded.trap('ZVM_STATUS_V2_TRAP', embeddedReturnDefault)}\n`);
+        if (embedded) emit(`${ind()}${embedded.trap('ZVM_STATUS_V2_TRAP', embeddedReturnDefault, node.zigvmTrapLocation)}\n`);
         else emit(`${ind()}porf_throw_new(${node[N_A]}, ${rx(node[N_B], P_COMMA)});\n`);
         return;
 
