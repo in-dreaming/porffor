@@ -130,6 +130,9 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
     blob.set(hex(item.moduleId, 16, 'ScriptLibrary ModuleId'), at + 8);
     blob.set(hex(item.interfaceDigest, 32, 'ScriptLibrary interface digest'), at + 24);
     u32(blob, at + 56, item.requirement === 'optional' ? 1 : 0);
+    u32(blob, at + 64, item.fallback.tag);
+    u32(blob, at + 68, item.fallback.aux);
+    u64(blob, at + 72, item.fallback.payload, 'ScriptLibrary optional fallback payload');
   });
   capabilities.forEach((item, index) => { u32(blob, capabilityOffset + index * 8, item.id); u32(blob, capabilityOffset + index * 8 + 4, item.value); });
   const hostImports = zigvm?.hostImports ?? [];

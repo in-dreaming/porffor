@@ -19,8 +19,16 @@ const cType = type => ({ i32: 'i32', f64: 'f64', void: 'void' })[type];
 // exec/budget/status chain to ScriptLibrary.  No generated pointer survives a
 // snapshot boundary.
 export const libraryCall = (id, args, type) => {
-  if (type !== 2 || args.length !== 1) throw new Error('embedded ScriptLibrary v1 lowering currently requires one i32 argument and i32 result');
-  return `zvm_porf_library_i32(exec, provider, status, ${id}u, ${args[0]})`;
+  const values = args.map(({ expression, type: argType }) => {
+    if (argType === 2) return `(zvm_value_v2){ ZVM_VALUE_V2_I32, 0u, (u64)(i64)(${expression}) }`;
+    if (argType === 1) return `(zvm_value_v2){ ZVM_VALUE_V2_F64, 0u, zvm_porf_f64_bits(${expression}) }`;
+    throw new Error(`embedded ScriptLibrary lowering does not support IR argument type ${argType}`);
+  });
+  const array = values.length ? `(zvm_value_v2[]){ ${values.join(', ')} }` : 'NULL';
+  if (type === 2) return `zvm_porf_library_i32(exec, provider, status, ${id}u, ${array}, ${values.length}u)`;
+  if (type === 1) return `zvm_porf_library_f64(exec, provider, status, ${id}u, ${array}, ${values.length}u)`;
+  if (type === 0) return `zvm_porf_library_void(exec, provider, status, ${id}u, ${array}, ${values.length}u)`;
+  throw new Error(`embedded ScriptLibrary lowering does not support IR result type ${type}`);
 };
 
 export const renderRuntime = ({ staticEnd, globals, hostImports }) => {
@@ -143,12 +151,20 @@ static inline zvm_status_v2 zvm_porf_poll(zvm_porf_exec_ctx_v2* exec, const zvm_
 static inline zvm_status_v2 zvm_porf_raise_trap(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, u32 code) {
   return provider->raise_trap(exec, code);
 }
-static inline i32 zvm_porf_library_i32(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, i32 value) {
-  zvm_value_v2 args[1] = { { ZVM_VALUE_V2_I32, 0u, (u64)(i64)value } };
+static inline i32 zvm_porf_library_i32(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, const zvm_value_v2* args, u32 arg_count) {
   zvm_value_v2 result = {0};
-  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, 1u, &result);
+  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, arg_count, &result);
   if (*status != ZVM_STATUS_V2_OK || result.tag != ZVM_VALUE_V2_I32 || result.aux != 0u) return 0;
   return (i32)result.payload;
+}
+static inline f64 zvm_porf_library_f64(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, const zvm_value_v2* args, u32 arg_count) {
+  zvm_value_v2 result = {0};
+  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, arg_count, &result);
+  if (*status != ZVM_STATUS_V2_OK || result.tag != ZVM_VALUE_V2_F64 || result.aux != 0u) return 0.0;
+  return zvm_porf_bits_f64(result.payload);
+}
+static inline void zvm_porf_library_void(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, const zvm_value_v2* args, u32 arg_count) {
+  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, arg_count, NULL);
 }
 ${host}
 `;

@@ -8,7 +8,8 @@ import parse from '../../parse.js';
 import codegen from '../../codegen.js';
 import render from '../../render.js';
 import { lowerExplicitExec } from './lowering.js';
-import { renderRuntime } from './abi.js';
+import { libraryCall, renderRuntime } from './abi.js';
+import { libraryImports } from './library.js';
 import { createAdapter } from './render.js';
 
 globalThis.Prefs.zigvmEmbeddedV2 = true;
@@ -29,6 +30,16 @@ assert.match(adapter.arrayGet('array', 'index'), /zvm_porf_memory\(exec, provide
 assert.match(adapter.arraySet('array', 'index', 'value'), /zvm_porf_memory\(exec, provider\).*array\.val.*index.*= value/);
 assert.match(adapter.arrayLength('array'), /zvm_porf_memory\(exec, provider\).*array\.val/);
 assert.match(adapter.setArrayLength('array', 'length'), /zvm_porf_memory\(exec, provider\).*array\.val.*= length/);
+
+const libraryManifest = libraryImports({
+  enjinLibraryImports: '5:11111111111111111111111111111111:7:0:2222222222222222222222222222222222222222222222222222222222222222:optional:i32=-7,9:11111111111111111111111111111111:8:0:2222222222222222222222222222222222222222222222222222222222222222:optional:f64=1.5'
+});
+assert.equal(libraryManifest[0].fallback.tag, 2);
+assert.equal(libraryManifest[0].fallback.payload, BigInt.asUintN(64, -7n));
+assert.equal(libraryManifest[1].fallback.tag, 3);
+assert.notEqual(libraryManifest[1].fallback.payload, 0n);
+assert.match(libraryCall(5, [ { expression: 'first', type: 2 }, { expression: 'second', type: 1 } ], 1), /zvm_porf_library_f64\(exec, provider, status, 5u, \(zvm_value_v2\[\]\).*2u\)/);
+assert.match(libraryCall(5, [], 0), /zvm_porf_library_void\(exec, provider, status, 5u, NULL, 0u\)/);
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const temp = mkdtempSync(join(tmpdir(), 'porffor-zigvm-v2-'));

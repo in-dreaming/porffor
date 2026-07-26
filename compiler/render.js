@@ -588,7 +588,7 @@ export default ({ funcs, data = [], globals = [], entry = null, prefs = {}, used
 
       case K.LibraryCall: {
         if (!embedded) throw new Error('ScriptLibrary calls require the embedded v2 profile');
-        const args = node[N_B].map(a => rx(a, P_COMMA));
+        const args = node[N_B].map(a => ({ expression: rx(a, P_COMMA), type: a[N_TYPE] }));
         const call = embedded.libraryCall(node[N_A], args, node[N_TYPE]);
         return [embedded.callSafepoint(call, node[N_TYPE]), P_POSTFIX];
       }
