@@ -13,6 +13,17 @@ export const checkGameplayProfile = program => {
     node.callee.property?.type === 'Identifier' && node.callee.property.name === 'dlopen' &&
     node.arguments?.[0]?.type === 'Literal' &&
     (node.arguments[0].value === '__zigvm_host__' || node.arguments[0].value === '__zigvm_library__');
+  // An exported ScriptLibrary is shared by every gameplay module using it.
+  // A `const` only freezes the binding: object, array, and constructed values
+  // would still create shared mutable module storage. Keep the accepted
+  // top-level initializers deliberately narrow and immutable.
+  const mutableGlobalValue = node => {
+    if (!node) return false;
+    if (node.type === 'ObjectExpression' || node.type === 'ArrayExpression' || node.type === 'NewExpression') return true;
+    if (node.type === 'CallExpression' || node.type === 'AwaitExpression') return true;
+    if (node.type === 'TSAsExpression' || node.type === 'TypeCastExpression') return mutableGlobalValue(node.expression);
+    return false;
+  };
   const visit = (node, topLevel = false) => {
     if (!node || typeof node !== 'object') return;
     if (canonicalHostCall(node)) {
@@ -23,6 +34,7 @@ export const checkGameplayProfile = program => {
     }
     if (node.type === 'ExportNamedDeclaration' && node.declaration) visit(node.declaration, true);
     if (node.type === 'VariableDeclaration' && topLevel && node.kind !== 'const') profileFailure('ZVM-PROFILE-001', 'mutable module global', node);
+    if (node.type === 'VariableDeclaration' && topLevel && node.kind === 'const' && node.declarations.some(item => mutableGlobalValue(item.init))) profileFailure('ZVM-PROFILE-001', 'mutable reference-valued module global', node);
     if (node.type === 'ImportExpression') profileFailure('ZVM-PROFILE-002', 'dynamic import', node);
     if (node.type === 'AwaitExpression' || node.type === 'YieldExpression' || node.type === 'TryStatement') profileFailure('ZVM-PROFILE-003', 'async or unwind construct', node);
     if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') && node.async) profileFailure('ZVM-PROFILE-003', 'async function', node);

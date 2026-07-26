@@ -109,7 +109,11 @@ export const buildDescriptor = ({ funcs, prefs, zigvm }) => {
   const scratchMax = u32Pref(prefs, 'enjinScratchMax');
   const scratchAlignment = u32Pref(prefs, 'enjinScratchAlignment', 8);
   if (scratchMin > scratchMax || scratchAlignment === 0 || (scratchAlignment & (scratchAlignment - 1)) !== 0) profileFailure('ZVM-DESCRIPTOR-006', 'invalid scratch limits or alignment');
-  u32(blob, 224, scratchMin); u32(blob, 228, scratchMax); u32(blob, 232, scratchAlignment); u32(blob, 236, u32Pref(prefs, 'enjinDescriptorFlags') | (libraryImportRecords.length ? libraryImportExtension : 0));
+  // The profile checker has already proved that this embedded module has no
+  // mutable module-global references. Make that fact artifact-authenticated
+  // so the host can require it before sharing a ScriptLibrary image.
+  const statelessLibraryProfile = 0x40000000;
+  u32(blob, 224, scratchMin); u32(blob, 228, scratchMax); u32(blob, 232, scratchAlignment); u32(blob, 236, u32Pref(prefs, 'enjinDescriptorFlags') | statelessLibraryProfile | (libraryImportRecords.length ? libraryImportExtension : 0));
   blob.set(hex(prefs.enjinPublicInterfaceDigest, 32, '--enjin-public-interface-digest'), 240);
   blob.set(hex(prefs.enjinSourceMapDigest, 32, '--enjin-source-map-digest'), 272);
   let signatureAt = signatureOffset;
