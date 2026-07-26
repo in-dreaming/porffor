@@ -164,7 +164,11 @@ static inline f64 zvm_porf_library_f64(zvm_porf_exec_ctx_v2* exec, const zvm_por
   return zvm_porf_bits_f64(result.payload);
 }
 static inline void zvm_porf_library_void(zvm_porf_exec_ctx_v2* exec, const zvm_porf_provider_api_v1* provider, zvm_status_v2* status, u32 import_id, const zvm_value_v2* args, u32 arg_count) {
-  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, arg_count, NULL);
+  // The uniform v2 call ABI always has an output slot, including a void
+  // ScriptLibrary import.  Keep the ignored undefined value on the caller's
+  // stack so the invocation-local router can dispatch the callee normally.
+  zvm_value_v2 result = { ZVM_VALUE_V2_UNDEFINED, 0u, 0u };
+  if (*status == ZVM_STATUS_V2_OK) *status = provider->host_dispatch(exec, 0x80000000u | import_id, args, arg_count, &result);
 }
 ${host}
 `;

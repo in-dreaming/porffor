@@ -113,6 +113,35 @@ try {
   assert.match(enjinC, /zvm_porf_call_v2\(zvm_porf_exec_ctx_v2\* exec, u32 export_id/);
   assert.match(libraryC, /zvm_porf_library_void\(exec, provider, status, 5u/);
   assert.match(libraryC, /0x80000000u \| import_id/);
+  // A void import still crosses the uniform v2 call ABI.  Execute the
+  // generated module and require a non-null result slot in the provider
+  // callback; this catches a lowering that only compiles or pattern-matches.
+  const voidLibraryHarness = join(temp, 'void-library-harness.c');
+  writeFileSync(voidLibraryHarness, `#include "${library.replaceAll('\\', '/')}"
+static unsigned host_calls;
+static unsigned char linear[1024];
+static void *base(zvm_porf_exec_ctx_v2 *exec) { (void)exec; return linear; }
+static bool reserve(zvm_porf_exec_ctx_v2 *exec, uint32_t size) { (void)exec; return size <= sizeof linear; }
+static bool commit(zvm_porf_exec_ctx_v2 *exec, uint32_t size) { (void)exec; return size <= sizeof linear; }
+static void *scratch(zvm_porf_exec_ctx_v2 *exec, uint32_t size, uint32_t alignment) { (void)exec; (void)size; (void)alignment; return 0; }
+static void reset(zvm_porf_exec_ctx_v2 *exec) { (void)exec; }
+static zvm_status_v2 host(zvm_porf_exec_ctx_v2 *exec, uint32_t id, const zvm_value_v2 *args, uint32_t count, zvm_value_v2 *result) {
+  (void)exec;
+  if (id != (0x80000000u | 5u) || !args || count != 1u || !result) return ZVM_STATUS_V2_INVALID_ARGUMENT;
+  host_calls++;
+  *result = (zvm_value_v2){ ZVM_VALUE_V2_UNDEFINED, 0u, 0u };
+  return ZVM_STATUS_V2_OK;
+}
+static zvm_status_v2 poll(zvm_porf_exec_ctx_v2 *exec, uint32_t flags) { (void)exec; (void)flags; return ZVM_STATUS_V2_OK; }
+int main(void) {
+  zvm_porf_provider_api_v1 api = { sizeof api, ZVM_PORFFOR_PROVIDER_API_V1_VERSION, base, reserve, commit, scratch, reset, host, poll, 0, 0, 0 };
+  zvm_porf_exec_boundary_v2 boundary = { ZVM_PORF_EXEC_BOUNDARY_V2_MAGIC, sizeof boundary, &api, {{2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2}}, {{3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3}}, 0, 17, 1 };
+  zvm_value_v2 arg = { ZVM_VALUE_V2_F64, 0u, 0x3ff0000000000000ULL }, result = {0};
+  if (zvm_porf_call_v2((zvm_porf_exec_ctx_v2 *)&boundary, 42u, 17u, &arg, 1u, &result) != ZVM_STATUS_V2_OK) return 1;
+  return host_calls == 1u ? 0 : 2;
+}`);
+  execFileSync('zig', [ 'cc', `-I${includeDir}`, voidLibraryHarness, '-o', executablePath('void-library-harness') ], { cwd: root, stdio: 'pipe' });
+  runCompiled('void-library-harness');
   const libraryDescriptorPrefs = {
     enjinModuleId: '01010101010101010101010101010101', enjinProviderId: '02020202020202020202020202020202',
     enjinProviderAbiDigest: '0303030303030303030303030303030303030303030303030303030303030303',
