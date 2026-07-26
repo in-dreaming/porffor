@@ -19,7 +19,10 @@ export const checkGameplayProfile = program => {
   // top-level initializers deliberately narrow and immutable.
   const mutableGlobalValue = node => {
     if (!node) return false;
-    if (node.type === 'ObjectExpression' || node.type === 'ArrayExpression' || node.type === 'NewExpression') return true;
+    // This declaration is lowered to an invocation-local provider binding;
+    // it does not allocate module-global library state.
+    if (canonicalHostCall(node)) return false;
+    if (node.type === 'ObjectExpression' || node.type === 'ArrayExpression' || node.type === 'NewExpression' || node.regex != null) return true;
     if (node.type === 'CallExpression' || node.type === 'AwaitExpression') return true;
     if (node.type === 'TSAsExpression' || node.type === 'TypeCastExpression') return mutableGlobalValue(node.expression);
     return false;

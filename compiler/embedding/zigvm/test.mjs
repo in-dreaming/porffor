@@ -180,6 +180,7 @@ int main(int argc, char **argv) {
     [ 'ZVM-PROFILE-001', 'export let state: i32 = 1;' ],
     [ 'ZVM-PROFILE-001', 'const shared = { value: 1 }; export function run(): i32 { shared.value = 2; return shared.value; }' ],
     [ 'ZVM-PROFILE-001', 'const shared = [1]; export function run(): i32 { shared[0] = 2; return shared[0]; }' ],
+    [ 'ZVM-PROFILE-001', 'const shared = /stateful/g; export function run(): i32 { return 1; }' ],
     [ 'ZVM-PROFILE-004', 'const run = eval; run("1");' ],
     [ 'ZVM-PROFILE-004', '(0, eval)("1");' ],
     [ 'ZVM-PROFILE-004', 'globalThis.eval("1");' ],
